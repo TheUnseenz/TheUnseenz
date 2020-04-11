@@ -1,7 +1,5 @@
 # TheUnseenz
 A SC2 AI bot.
-
-# Goals of the bot.
 The bot will be a reactive macro-focused bot that adapts its behaviour to the game-state. It will be designed to be generic enough to handle most scenarios without explicit instructions on dealing with specific strategies, and will figure out the best response on its own. 
 
 The bot should be portable enough that it will be easy to adapt to play random race, but for now it will play Protoss until I have developed its capabilities better.
