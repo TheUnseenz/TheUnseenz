@@ -4,6 +4,8 @@ The bot will be a reactive macro-focused bot that adapts its behaviour to the ga
 
 The bot should be portable enough that it will be easy to adapt to play random race, but for now it will play Protoss until I have developed its capabilities better.
 
+Should I be able to make this perform well enough, I will enter it in the ProBots tournament (ESChamp). 
+
 I do not plan to include machine learning in this yet, but I will eventually have many parameters to decide on which can be fine-tuned by machine learning.
 
 # Why am I making this?
