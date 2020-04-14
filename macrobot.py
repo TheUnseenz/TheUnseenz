@@ -65,6 +65,118 @@ class MacroBot(sc2.BotAI):
         # How do we count the combat strength of swarm hosts and brood lords? What about spellcasters?
         self.zerg_army = {ZERGLING, BANELING, ROACH, RAVAGER, HYDRALISK, LURKER, QUEEN, MUTALISK, CORRUPTOR, BROODLORD, ULTRALISK}
     
+    def calculate_effective_dps(self, own_army, enemy_army):    
+        # Effective DPS = Target own unit's efficiency at killing target enemy's unit. Efficiency defined by damage done vs cost of own unit vs cost of enemy unit.
+        # Modifiers to effective DPS: Splash damage increases effective DPS by factor of splash area vs enemy unit size. Bonuses to attribute and armor of enemy are included.
+        # Splash modifier is currently modeled as square root of splash area/unit area.
+        # If a unit is unable to hit the target, it does 0 effective DPS.
+        # Effective HP is the reciprocal of enemy effective DPS against us
+        # Units that cannot be damaged by the enemy would otherwise be counted as infinite hp, so cap it to avoid overvalueing flying units (and division by zero)
+        # TODO: Find the best value for the effective hp cap. Current cap: 40s to die on equal costs.
+        # TODO: Find best gas value multiplier. Current: 2x minerals
+        # TODO: Include damage wasted in effective dps calculations
+        # TODO: Update unit stats with their upgrades as the game progresses.
+        if enemy_army.is_air: # Anti-air weapons
+            if own_army.bonus_attr_air in enemy_army.attribute:
+                bonus = 1
+            else:
+                bonus = 0
+            damage_done = own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.armor
+            if damage_done > 0:
+                # Time_to_kill = Total hp+shield/(damage done per attacks per attack speed). Does NOT consider overkill damage.
+                time_to_kill = ((enemy_army.hp)/((own_army.attacks_air*(own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.armor))/(own_army.attack_speed_air))\
+                + (enemy_army.shields)/((own_army.attacks_air*(own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.shield_armor))/(own_army.attack_speed_air)))
+                # Effective_dps = %(hp+shield) dps
+                effective_dps_air = 1/time_to_kill                        
+            
+                # Add in range-kiting speed disadvantage
+                if own_army.is_air: # Air vs air combat
+                    # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
+                    if (enemy_army.range_air > own_army.range_air):
+                        # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
+                        if (own_army.movespeed > enemy_army.movespeed*((enemy_army.attack_speed_air - enemy_army.attack_point_air)/enemy_army.attack_speed_air)):
+                            # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
+                            time_to_reach = (enemy_army.range_air - own_army.range_air)/(own_army.movespeed - enemy_army.movespeed*((enemy_army.attack_speed_air \
+                                            - enemy_army.attack_point_air)/enemy_army.attack_speed_air))
+                            
+                            effective_dps_air = 1/(time_to_reach + time_to_kill)
+                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
+                        else: 
+                            effective_dps_air = 0
+                else: # Enemy air vs our ground combat
+                    # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
+                    if (enemy_army.range_ground > own_army.range_air):
+                        # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
+                        if (own_army.movespeed > enemy_army.movespeed*((enemy_army.attack_speed_ground - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground)):
+                            # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
+                            time_to_reach = (enemy_army.range_ground - own_army.range_air)/(own_army.movespeed - enemy_army.movespeed*((enemy_army.attack_speed_ground \
+                                            - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground))
+                            
+                            effective_dps_air = 1/(time_to_reach + time_to_kill)
+                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
+                        else: 
+                            effective_dps_air = 0
+            
+                # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius
+                effective_dps_air = max(math.sqrt(own_army.splash_area_air/(self.PI*(enemy_army.size/2)**2)), 1) * effective_dps_air
+            # If damage_done = 0, either we can't hit air or they have equal armor to our damage, in which case attacking is futile despite still doing 0.5 damage.
+            else: 
+                effective_dps_air = 0
+        # Enemy is not air, so air dps = 0                            
+        else: 
+            effective_dps_air = 0
+        if enemy_army.is_ground: # Anti-ground weapons         
+            if own_army.bonus_attr_ground in enemy_army.attribute:
+                bonus = 1
+            else:
+                bonus = 0
+            damage_done = own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.armor
+            if damage_done > 0:
+                # Time_to_kill = Total hp+shield/(damage done per attacks per attack speed). Does NOT consider overkill damage.
+                time_to_kill = ((enemy_army.hp)/((own_army.attacks_ground*(own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.armor))/(own_army.attack_speed_ground))\
+                + (enemy_army.shields)/((own_army.attacks_ground*(own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.shield_armor))/(own_army.attack_speed_ground)))
+                # Effective_dps = %(hp+shield) dps
+                effective_dps_ground = 1/time_to_kill                        
+                
+                # Add in range-kiting speed disadvantage
+                if own_army.is_air: # Enemy ground vs our air combat
+                    # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
+                    if (enemy_army.range_air > own_army.range_ground):
+                        # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
+                        if (own_army.movespeed > enemy_army.movespeed*((enemy_army.attack_speed_air - enemy_army.attack_point_air)/enemy_army.attack_speed_air)):
+                            # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
+                            time_to_reach = (enemy_army.range_air - own_army.range_ground)/(own_army.movespeed - enemy_army.movespeed*((enemy_army.attack_speed_air \
+                                            - enemy_army.attack_point_air)/enemy_army.attack_speed_air))
+                            
+                            effective_dps_ground = 1/(time_to_reach + time_to_kill)
+                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
+                        else: 
+                            effective_dps_ground = 0
+                else: # Ground vs ground combat
+                    # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
+                    if (enemy_army.range_ground > own_army.range_ground):
+                        # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
+                        if (own_army.movespeed > enemy_army.movespeed*((enemy_army.attack_speed_ground - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground)):
+                            # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
+                            time_to_reach = (enemy_army.range_ground - own_army.range_ground)/(own_army.movespeed - enemy_army.movespeed*((enemy_army.attack_speed_ground \
+                                            - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground))
+                            
+                            effective_dps_ground = 1/(time_to_reach + time_to_kill)
+                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
+                        else: 
+                            effective_dps_ground = 0
+                
+                # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius
+                effective_dps_ground = max(math.sqrt(own_army.splash_area_ground/(self.PI*(enemy_army.size/2)**2)), 1) * effective_dps_ground
+            else:
+                effective_dps_ground = 0
+        # Enemy is not ground, so ground dps = 0
+        else:
+            effective_dps_ground = 0
+            
+        # Add in cost difference modifier. Vespene gas is counted as equally valuable as minerals. It may be worth more.
+        effective_dps = ((enemy_army.minerals + 2*enemy_army.vespene)/(own_army.minerals + 2*own_army.vespene))*max(effective_dps_air,effective_dps_ground)
+        return effective_dps
         
         
     # Removes destroyed units from known_enemy_units and known_enemy_structures. Seems to work. Will not register units dying in fog as dead, how do we deal with this?
