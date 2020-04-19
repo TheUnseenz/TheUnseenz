@@ -269,16 +269,24 @@ class MacroBot(sc2.BotAI):
         best_unit = own_army_race[np.argmin(threat_level)]
         return best_unit
                     
-    def scout_map(self):
-        # sets the next waypoint for the army in case there is nothing on the map
-        # if we didnt start to clear the map already
-        if not self.clear_map:
-            # start with enemy starting location, then cycle through all expansions
-            self.clear_map = itertools.cycle(self.ordered_expansions)
-            self.next_scout = next(self.clear_map)
-        # we can see the expansion but there seems to be nothing there, get next
-        if self.units.closer_than(5, self.army_target):
-            self.next_scout = next(self.clear_map)
+    def scout_map(self, priority = 'Enemy'):
+        # Assigns the next scouting location when called. This scouting location will change each time it is called, so only call it once for idle units! Spamming this will result in spazzing.
+        # Input priority 'Enemy' or 'Map'
+        # If priority is enemy, searches expansions in order of closest to enemy main (including the main)
+        # If priority is map, searches expansions in order of closest to us (not including our taken bases)
+        # Credit to RoachRush
+        if priority == 'Enemy':
+            if not self.scout_enemy:
+                self.scout_enemy = itertools.cycle(self.ordered_expansions_enemy)
+            self.scout_enemy_next = next(self.scout_enemy)
+            scout_location = self.scout_enemy_next
+        if priority == 'Map':
+            if not self.clear_map:
+                # start with enemy starting location, then cycle through all expansions
+                self.clear_map = itertools.cycle(self.ordered_expansions)
+            self.clear_map_next = next(self.clear_map)
+            scout_location = self.clear_map_next
+        return scout_location
 
     
     # Removes destroyed units from known_enemy_units and known_enemy_structures. Seems to work. Will not register units dying in fog as dead, how do we deal with this?
@@ -320,6 +328,9 @@ class MacroBot(sc2.BotAI):
         # TODO: Keep track of which bases are taken by enemy so we don't keep running scouts into them.
         self.ordered_expansions = list(set(sorted(self.expansion_locations.keys())) - set(sorted(self.owned_expansions.keys())))
         self.ordered_expansions = sorted(
+            self.ordered_expansions, key=lambda expansion: expansion.distance_to(self.start_location) 
+        )
+        self.ordered_expansions_enemy = sorted(
             self.ordered_expansions, key=lambda expansion: expansion.distance_to(self.enemy_start_locations[0]) 
         )
         
@@ -370,30 +381,45 @@ class MacroBot(sc2.BotAI):
         # TODO: If we have notably smaller forces but both armies are small, use workers to turn the tides
         # TODO: Preferred targets by enemy dps, armor type, armor, hp remaining, range
         # TODO: Use army abilities
-        self.all_army = self.units.not_structure - self.units(PROBE)
-        for army in self.all_army:
-            # Choose target and attack, filter out invisible targets
-            targets = (self.enemy_units | self.enemy_structures).filter(lambda unit: unit.can_be_attacked and not self.units({LARVA, EGG, INTERCEPTOR}) )
+        self.all_army = self.units.not_structure - self.units(PROBE) - self.units(INTERCEPTOR)
+        
+        # Choose target and attack, filter out invisible targets
+        targets = (self.enemy_units | self.enemy_structures).filter(lambda unit: unit.can_be_attacked and not self.units({LARVA, EGG, INTERCEPTOR}))
+        if self.all_army:
+            army_center = self.all_army.center
+        for army in self.all_army:            
             if targets:
-                target = targets.closest_to(army)
-                # Unit has no attack, stay near other army units                    
-                if army.weapon_cooldown == -1: 
-                    self.do(army.move(self.all_army.closest_to(army)))                
-                # Unit has just attacked, stutter step while waiting for attack cooldown
-                elif army.weapon_cooldown > 0.5:
-                    kite_pos = army.position.towards(target.position, -1)
-                    self.do(army.move(kite_pos))
-                # Unit is ready to attack, go attack.
-                else:
-                    self.do(army.attack(target))
+                # If the enemy is not a threat, group up all army to attack together.
+                if True: #min(threat_level) < 1:
+                    target = targets.closest_to(army)
+                    # Unit has no attack, stay near other army units                    
+                    if army.weapon_cooldown == -1 and not army.is_moving: 
+                        self.do(army.move(self.all_army.closest_to(army)))                
+                    # Unit has just attacked, stutter step while waiting for attack cooldown
+                    elif army.weapon_cooldown > self.kite_distance/army.movement_speed and army.target_in_range(target, bonus_distance = self.kite_distance):
+                        kite_pos = army.position.towards(target.position, -1)
+#                        self.do(army(STOP_DANCE))
+                        self.do(army.move(kite_pos))
+                        if army in self.units(VOIDRAY):
+                            self.do(army(EFFECT_VOIDRAYPRISMATICALIGNMENT))
+                    # Regroup
+                    elif army.distance_to_squared(army_center) > 225 and not army.target_in_range(target) and targets.exclude_type({SCV, PROBE, DRONE}) and not army.is_moving:
+                        self.do(army.move(army_center))
+                    # Unit is ready to attack, go attack. Use smart command (right click) instead of attack because carriers/bcs don't work with attack
+                    else:
+                        if not army.is_attacking:
+                            self.do(army.smart(target))
+                # If the enemy is currently too strong, avoid the enemy army and poke.
+#                if threat_level >= 1:
+                    
+                # If the enemy is attacking us and we are too weak by a little bit, fight with static defense and/or pull workers.
                 
-            elif self.MAX_SUPPLY - self.supply_used < 20:
-                self.do(army.attack(self.enemy_start_locations[0]))
-            
-        for vr in self.units(VOIDRAY): # Does not work!
-            # Activate charge ability if the void ray just attacked
-            if vr.weapon_cooldown > 0:
-                self.do(vr(EFFECT_VOIDRAYPRISMATICALIGNMENT))
+                # If the enemy is attacking us and we are too weak by far, rat.
+                
+                
+            # If we don't see any enemies, scout the map
+            elif army in self.all_army.idle:# and self.supply_used > 180:     
+                self.do(army.move(self.scout_map(priority = 'Map')))
                     
         # Morph archons            
         if self.units(HIGHTEMPLAR).idle.ready.amount >= 2:
