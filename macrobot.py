@@ -111,12 +111,16 @@ class MacroBot(sc2.BotAI):
         # Splash modifier is currently modeled as square root of splash area/unit area.
         # If a unit is unable to hit the target, it does 0 effective DPS.
         # Effective HP is the reciprocal of enemy effective DPS against us
-        # Units that cannot be damaged by the enemy would otherwise be counted as infinite hp, so cap it to avoid overvalueing flying units (and division by zero)
-        # TODO: Find the best value for the effective hp cap. Current cap: 40s to die on equal costs.
+        # Units that cannot be damaged by the enemy would otherwise be counted as infinite hp, so cap it to avoid overvaluing flying units (and division by zero)
+        # TODO: Find the best value for the effective hp cap.
         # TODO: Find best gas value multiplier. Current: 2x minerals
         # TODO: Include damage wasted in effective dps calculations
         # TODO: Update unit stats with their upgrades as the game progresses.
-        # TODO: Perhaps we can calculate the stat table once at game start and as units are upgraded, and use those variables for threat level calculations instead of constantly calculating?
+        time_to_kill_air = math.inf
+        time_to_kill_ground = math.inf
+        time_to_reach_air = math.inf
+        time_to_reach_ground = math.inf
+        
         if enemy_army.is_air: # Anti-air weapons
             if own_army.bonus_attr_air in enemy_army.attribute:
                 bonus = 1
@@ -125,10 +129,9 @@ class MacroBot(sc2.BotAI):
             damage_done = own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.armor
             if damage_done > 0:
                 # Time_to_kill = Total hp+shield/(damage done per attacks per attack speed). Does NOT consider overkill damage.
-                time_to_kill = ((enemy_army.hp)/((own_army.attacks_air*(own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.armor))/(own_army.attack_speed_air))\
+                time_to_kill_air = ((enemy_army.hp)/((own_army.attacks_air*(own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.armor))/(own_army.attack_speed_air))\
                 + (enemy_army.shields)/((own_army.attacks_air*(own_army.dmg_air + own_army.bonus_dmg_air*bonus - enemy_army.shield_armor))/(own_army.attack_speed_air)))
-                # Effective_dps = %(hp+shield) dps
-                effective_dps_air = 1/time_to_kill                        
+                # Effective_dps = %(hp+shield) dps                     
             
                 # Add in range-kiting speed disadvantage
                 if own_army.is_air: # Air vs air combat
@@ -137,35 +140,28 @@ class MacroBot(sc2.BotAI):
                         # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
                         if (own_army.movement_speed > enemy_army.movement_speed*((enemy_army.attack_speed_air - enemy_army.attack_point_air)/enemy_army.attack_speed_air)):
                             # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
-                            time_to_reach = (enemy_army.range_air - own_army.range_air)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_air \
+                            time_to_reach_air = (enemy_army.range_air - own_army.range_air)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_air \
                                             - enemy_army.attack_point_air)/enemy_army.attack_speed_air))
                             
-                            effective_dps_air = 1/(time_to_reach + time_to_kill)
-                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
-                        else: 
-                            effective_dps_air = 0
+                    else: # We have the same or more range than them, so they can't kite us.
+                        time_to_reach_air = 0
+                            
                 else: # Enemy air vs our ground combat
                     # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
                     if (enemy_army.range_ground > own_army.range_air):
                         # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
                         if (own_army.movement_speed > enemy_army.movement_speed*((enemy_army.attack_speed_ground - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground)):
                             # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
-                            time_to_reach = (enemy_army.range_ground - own_army.range_air)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_ground \
+                            time_to_reach_air = (enemy_army.range_ground - own_army.range_air)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_ground \
                                             - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground))
                             
-                            effective_dps_air = 1/(time_to_reach + time_to_kill)
-                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
-                        else: 
-                            effective_dps_air = 0
+                    else: # We have the same or more range than them, so they can't kite us.
+                        time_to_reach_air = 0
+                    
             
                 # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius -> 0.8*
-                effective_dps_air = max(0.8*(own_army.splash_area_air/(self.PI*(enemy_army.size/2)**2)), 1) * effective_dps_air
-            # If damage_done = 0, either we can't hit air or they have equal armor to our damage, in which case attacking is futile despite still doing 0.5 damage.
-            else: 
-                effective_dps_air = 0
-        # Enemy is not air, so air dps = 0                            
-        else: 
-            effective_dps_air = 0
+                time_to_kill_air = time_to_kill_air/(max(0.8*(own_army.splash_area_air/(self.PI*(enemy_army.size/2)**2)), 1))
+                
         if enemy_army.is_ground: # Anti-ground weapons         
             if own_army.bonus_attr_ground in enemy_army.attribute:
                 bonus = 1
@@ -174,10 +170,9 @@ class MacroBot(sc2.BotAI):
             damage_done = own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.armor
             if damage_done > 0:
                 # Time_to_kill = Total hp+shield/(damage done per attacks per attack speed). Does NOT consider overkill damage.
-                time_to_kill = ((enemy_army.hp)/((own_army.attacks_ground*(own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.armor))/(own_army.attack_speed_ground))\
+                time_to_kill_ground = ((enemy_army.hp)/((own_army.attacks_ground*(own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.armor))/(own_army.attack_speed_ground))\
                 + (enemy_army.shields)/((own_army.attacks_ground*(own_army.dmg_ground + own_army.bonus_dmg_ground*bonus - enemy_army.shield_armor))/(own_army.attack_speed_ground)))
                 # Effective_dps = %(hp+shield) dps
-                effective_dps_ground = 1/time_to_kill                        
                 
                 # Add in range-kiting speed disadvantage
                 if own_army.is_air: # Enemy ground vs our air combat
@@ -186,121 +181,151 @@ class MacroBot(sc2.BotAI):
                         # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
                         if (own_army.movement_speed > enemy_army.movement_speed*((enemy_army.attack_speed_air - enemy_army.attack_point_air)/enemy_army.attack_speed_air)):
                             # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
-                            time_to_reach = (enemy_army.range_air - own_army.range_ground)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_air \
+                            time_to_reach_ground = (enemy_army.range_air - own_army.range_ground)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_air \
                                             - enemy_army.attack_point_air)/enemy_army.attack_speed_air))
-                            
-                            effective_dps_ground = 1/(time_to_reach + time_to_kill)
-                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
-                        else: 
-                            effective_dps_ground = 0
+                    else: # We have the same or more range than them, so they can't kite us.
+                        time_to_reach_ground = 0
+                    
                 else: # Ground vs ground combat
                     # If enemy range is more than our range, add kiting disadvantage. Otherwise, no dps modifier (range advantage is a hp modifier)
                     if (enemy_army.range_ground > own_army.range_ground):
                         # If we can catch up to them, our effective dps is now time to kill enemy + time to reach them
                         if (own_army.movement_speed > enemy_army.movement_speed*((enemy_army.attack_speed_ground - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground)):
                             # Time to reach = Range disadvantage / Speed advantage (our speed vs enemy kiting speed)
-                            time_to_reach = (enemy_army.range_ground - own_army.range_ground)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_ground \
+                            time_to_reach_ground = (enemy_army.range_ground - own_army.range_ground)/(own_army.movement_speed - enemy_army.movement_speed*((enemy_army.attack_speed_ground \
                                             - enemy_army.attack_point_ground)/enemy_army.attack_speed_ground))
                             
-                            effective_dps_ground = 1/(time_to_reach + time_to_kill)
-                        # If we can't catch up to them, we effectively cannot reach them and thus cannot damage them.
-                        else: 
-                            effective_dps_ground = 0
+                    else: # We have the same or more range than them, so they can't kite us.
+                        time_to_reach_ground = 0
+                    
                 
                 # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius -> 0.8*
-                effective_dps_ground = max(0.8*(own_army.splash_area_ground/(self.PI*(enemy_army.size/2)**2)), 1) * effective_dps_ground
-            else:
-                effective_dps_ground = 0
-        # Enemy is not ground, so ground dps = 0
-        else:
-            effective_dps_ground = 0
-            
+                time_to_kill_ground = time_to_kill_ground/(max(0.8*(own_army.splash_area_ground/(self.PI*(enemy_army.size/2)**2)), 1))
+                
         # Add in cost difference modifier. Vespene gas is counted as equally valuable as minerals. It may be worth more.
-        effective_dps = ((enemy_army.minerals + self.gas_value*enemy_army.vespene)/(own_army.minerals + self.gas_value*own_army.vespene))*max(effective_dps_air,effective_dps_ground)
-        return effective_dps
+        time_to_kill_air = time_to_kill_air*((own_army.minerals + self.gas_value*own_army.vespene)/(enemy_army.minerals + self.gas_value*enemy_army.vespene))
+        time_to_kill_ground = time_to_kill_ground*((own_army.minerals + self.gas_value*own_army.vespene)/(enemy_army.minerals + self.gas_value*enemy_army.vespene))
         
-    def calculate_threat_level(self, own_army_race, own_units, enemy_army_race, enemy_units):
+        # Choose the better weapon
+        if (time_to_kill_air + time_to_reach_air) < (time_to_kill_ground + time_to_reach_ground):
+            time_to_kill = time_to_kill_air
+            time_to_reach = time_to_reach_air
+        else:
+            time_to_kill = time_to_kill_ground
+            time_to_reach = time_to_reach_ground
+        
+#        effective_dps = ((enemy_army.minerals + self.gas_value*enemy_army.vespene)/(own_army.minerals + self.gas_value*own_army.vespene))*max(effective_dps_air,effective_dps_ground)
+        return [time_to_kill, time_to_reach]
+        
+    def calculate_threat_level(self, own_army_race, own_units, enemy_army_race, enemy_units, future_own_units = None, future_enemy_units = None):
         # Finds the best units to deal with the known enemy army, and the current threat level represented by our present units vs known enemy units.
+        # For better performance, only run this function when either army size changes!
         # TODO: Improve this function. Most importantly, it needs to account for the existing units and that specialist units are good because they can focus on the units they are good against.
         #   Currently heavily favours tempests and stalkers, which actually isn't too bad an army comp for most scenarios.
         #   Synergy and foresight? Consider the strengths of 2 units at a time, rather than 1. Ideally, consider n extra units as a combined strength, but this would take too much compute.
         #   Tanking for other units and dps drop as each unit dies: Dps dealt lasts as long as the unit stays alive, and units survive in order of their range.
-        #   Size matters: The shorter the range and the bigger the unit, the fewer numbers can attack at once. Conversely, the bigger the enemy unit, the more units can hit it.
-        # TODO: We may want to know how much better the best unit is than the next best alternatives for handling tech requirements.
+        #   Unit size matters: The shorter the range and the bigger the unit, the fewer numbers can attack at once. Conversely, the bigger the enemy unit, the more units can hit it.
+        
+        
         # Own_army_race and enemy_army_race are list of units that can be made by us/enemy.
         # Own_units and enemy_units are the units we currently have and we think the enemy currently has.
         # enemy_units(enemy_army) therefore filters the existing units of the given type of enemy army unit.
+        # Future_own_units and future_enemy_units are arrays of extra units we anticipate. Future_own_units[0] will give number of units of unit id 0.
+        # To ensure fair comparisons, use number of future units = some_fixed_cost/unit_value_of_unit_id
         
-        effective_dps_dealt = np.zeros((len(own_army_race),len(enemy_army_race)))
+        own_effective_dps = np.zeros((len(own_army_race),len(enemy_army_race)))
+        own_effective_hp = np.zeros((len(own_army_race),len(enemy_army_race)))
+        enemy_effective_dps = np.zeros((len(own_army_race),len(enemy_army_race)))
+        enemy_effective_hp = np.zeros((len(own_army_race),len(enemy_army_race)))
         effective_dps_taken = np.zeros((len(own_army_race),len(enemy_army_race)))
-        effective_dps_dealt_test = np.zeros((len(own_army_race),len(enemy_army_race)))
-        effective_dps_taken_test = np.zeros((len(own_army_race),len(enemy_army_race)))
-        threat_level = np.zeros(len(own_army_race))
+        effective_dps_dealt = np.zeros((len(own_army_race),len(enemy_army_race)))
+        
+        own_time_to_kill = np.zeros((len(own_army_race),len(enemy_army_race)))
+        enemy_time_to_kill = np.zeros((len(own_army_race),len(enemy_army_race)))
+        
+        if future_own_units is None:
+            future_own_units = np.zeros(len(own_army_race))
+        if future_enemy_units is None:
+            future_enemy_units = np.zeros(len(enemy_army_race))
         i = 0
         for own_army in own_army_race:
             j = 0
             for enemy_army in enemy_army_race:
+                # Add modifier: Number of units in combat
+                # Unit size drop off: Model dps as max efficiency at units that can fit within (2*PI/4)*(range+2), after which you get sharp drop off. (for ground units only)
+                # Too many units: Model excess unit dps as a square root drop off.
+                # Check: Square roots in this function may cause lag. May need to find alternative.
+                # Known issue: If 2 units have the same range, they will be allocated their own optimal units attacking. Similarly, they will not count as tanking for each other.
+                # Conflicting units: Widow mines and marines, marauders and ghosts, thors, unsieged tanks and cyclones, stalkers and immortals, ravagers and hydras.
                 
+                # Note: Units we don't own will be registered as the initialized time to kill and dps dealt, which is currently both 0
+                if (own_units(own_army) or future_own_units[i]) and (enemy_units(enemy_army) or future_enemy_units[j]):
+                    optimal_units_attacking = math.floor((self.PI/2)*(max(own_army.range_ground, own_army.range_air) + 2)/own_army.size)
+                    if (own_units(own_army).amount + future_own_units[i]) <= optimal_units_attacking or not own_army.is_ground:
+                        own_time_to_kill[i][j] = self.own_time_to_kill[i][j].copy()\
+                        *((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene)\
+                        /((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene)))
+                    else:                    
+                        own_time_to_kill[i][j] = self.own_time_to_kill[i][j].copy()\
+                        *((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene)\
+                        /(optimal_units_attacking + (math.sqrt(own_units(own_army).amount + future_own_units[i] - optimal_units_attacking))*(own_army.minerals + self.gas_value*own_army.vespene)))
+                    
+                    # Effective dps = Time it takes for each unit to reach and kill all units of another type. Weigh this for all units by their total value.
+                    effective_dps_dealt[i][j] = (1/(self.own_time_to_reach[i][j].copy() + own_time_to_kill[i][j].copy()))\
+                        *((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene))
                 
-                effective_dps_dealt[i][j] = (self.calculate_effective_dps(own_army, enemy_army))\
-                *(max(enemy_units(enemy_army).amount,0.2)*(enemy_army.minerals + self.gas_value*enemy_army.vespene))\
-                *(max(own_units(own_army).amount,0.2)*(own_army.minerals + self.gas_value*own_army.vespene))
-                effective_dps_taken[i][j] = (self.calculate_effective_dps(enemy_army, own_army))\
-                *(max(enemy_units(enemy_army).amount,0.2)*(enemy_army.minerals + self.gas_value*enemy_army.vespene))\
-                *(max(own_units(own_army).amount,0.2)*(own_army.minerals + self.gas_value*own_army.vespene))
+                # Calculations for enemy are symmetrical.
+                    optimal_units_attacking = math.floor((self.PI/2)*(max(enemy_army.range_ground, enemy_army.range_air) + 2)/enemy_army.size)
+                    if (enemy_units(enemy_army).amount + future_enemy_units[j]) <= optimal_units_attacking or not enemy_army.is_ground:
+                        enemy_time_to_kill[i][j] = self.enemy_time_to_kill[i][j].copy()\
+                        *((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene)\
+                        /((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene)))
+                    else:                    
+                        enemy_time_to_kill[i][j] = self.enemy_time_to_kill[i][j].copy()\
+                        *((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene)\
+                        /(optimal_units_attacking + (math.sqrt(enemy_units(enemy_army).amount + future_enemy_units[j] - optimal_units_attacking))*(enemy_army.minerals + self.gas_value*enemy_army.vespene)))
+                        
+                    effective_dps_taken[i][j] = (1/(self.enemy_time_to_reach[i][j].copy() + enemy_time_to_kill[i][j].copy()))\
+                        *((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene))
                 
-                
-                effective_dps_dealt_test[i][j] = (self.calculate_effective_dps(own_army, enemy_army))\
-                *(max(enemy_units(enemy_army).amount,0.2)*(enemy_army.minerals + self.gas_value*enemy_army.vespene))\
-                *((own_units(own_army).amount + 1)*(own_army.minerals + self.gas_value*own_army.vespene))
-                effective_dps_taken_test[i][j] = (self.calculate_effective_dps(enemy_army, own_army))\
-                *(max(enemy_units(enemy_army).amount,0.2)*(enemy_army.minerals + self.gas_value*enemy_army.vespene))\
-                *((own_units(own_army).amount + 1)*(own_army.minerals + self.gas_value*own_army.vespene))
-            
+                    
                 j += 1
-            # Surprisingly, despite seemingly favouring massing one unit, it still builds some warp gates to balance out.
-            # Threat to our unit = total damage it takes from enemies/total damage it deals to enemies. Doesn't care if it can't hit all units as long as the sum of its damage is enough
-#            threat_level[i] = ((np.sum(effective_dps_taken,axis=1))/(np.sum(effective_dps_dealt,axis=1)))[i] # Seems to favour carriers and zealots
-            # Threat level against our unit = sum of (damage taken/damage dealt) vs known enemy units. Overvalues all-rounded units.
-            threat_level[i] = np.sum(effective_dps_taken[i][:]/np.clip(effective_dps_dealt[i][:],a_min=0.01,a_max=None)) # Seems to favour tempests and stalkers. Doesn't seem to react to enemy.
             i += 1        
         
+        no_threat = 0.01
+        own_effective_dps = np.sum(effective_dps_dealt.copy(),axis=1)
+        own_effective_hp = 1/np.sum(np.clip(effective_dps_taken.copy(),a_min=no_threat, a_max=None),axis=1)
+        enemy_effective_dps = np.sum(effective_dps_taken.copy(),axis=0)
+        enemy_effective_hp = 1/np.sum(np.clip(effective_dps_dealt.copy(), a_min=no_threat, a_max=None),axis=0)
         
-        # Unit size drop off: Model dps as max efficiency at units that can fit within (2*pi/4)*(range+2), after which you get sharp drop off. (for ground units only)
         # Units tanking for each other: Effective hp of unit is its time to reach + time to kill of all units shorter range than it.
+        # TODO: Also factor in time to kill of other units of the same type, not just shorter ranged units
+        i = 0        
+        for own_army in own_army_race:
+            j = 0
+            for other_own_army in own_army_race:
+                if max(own_army.range_ground, own_army.range_air) > max(other_own_army.range_ground, other_own_army.range_air):
+                    own_effective_hp[i] += np.sum(effective_dps_taken.copy(),axis=1)[j]
+                j += 1
+            i += 1
+        
+        i = 0        
+        for enemy_army in enemy_army_race:
+            j = 0
+            for other_enemy_army in enemy_army_race:
+                if max(enemy_army.range_ground, enemy_army.range_air) > max(other_enemy_army.range_ground, other_enemy_army.range_air):
+                    enemy_effective_hp[i] += np.sum(effective_dps_dealt.copy(),axis=0)[j]
+                j += 1
+            i += 1
+        
+
         # Combat score = sum of each unit's effective dps* its effective hp.
-        # Threat score = enemy's effective dps to us* its effective hp.
-        # Take our combat score/enemy threat score
+        own_combat_score = np.sum(own_effective_dps*own_effective_hp)
+        enemy_combat_score = np.sum(enemy_effective_dps*enemy_effective_hp)
+        # Threat level = our combat score/enemy combat score
+        threat_level = enemy_combat_score/own_combat_score
         
-        
-#        i = 0
-#        for own_army in own_army_race:
-#            effective_dps_dealt_temp = effective_dps_dealt
-#            effective_dps_taken_temp = effective_dps_taken
-#            effective_dps_dealt_temp[i,:] = effective_dps_dealt_test[i,:]
-#            effective_dps_taken_temp[i,:] = effective_dps_taken_test[i,:]      
-#            
-#            # Threat level i = Sum of total threats
-#            threat_level[i] = (np.sum(effective_dps_taken_temp/np.clip(effective_dps_dealt_temp,a_min=0.1,a_max=None))/len(own_army_race)) # Heavily favours zealots and stalkers 
-#        
-#            i += 1
-
-
-#        print('Statistics time!')
-#        print(effective_dps_dealt.shape)
-#        print(effective_dps_taken.shape)
-#        print('Totals:')
-#        print(np.sum(effective_dps_dealt))
-#        print(np.sum(effective_dps_taken))
-#        print('By row:')
-#        print(np.sum(effective_dps_dealt,axis=1))
-#        print(np.sum(effective_dps_taken,axis=1))
-#        print((np.sum(effective_dps_taken,axis=1))/(np.sum(effective_dps_dealt,axis=1)))
-            
-            
-
-        best_unit = own_army_race[np.argmin(threat_level)]
-        return [threat_level, best_unit]
+        return threat_level
                     
     def scout_map(self, priority = 'Enemy'):
         # Assigns the next scouting location when called. This scouting location will change each time it is called, so only call it once for idle units! Spamming this will result in spazzing.
