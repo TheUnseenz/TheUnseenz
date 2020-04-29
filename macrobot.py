@@ -561,43 +561,97 @@ class MacroBot(sc2.BotAI):
             await self.distribute_workers()
 
 
+        # Choose building placement
+        # Pylon positions = Walling placement, then next to unpowered buildings, then next to nexus without pylons, then next to other buildings. Avoid mineral line. TODO: Spotter pylons
+        if await self.can_place(PYLON, self.main_base_ramp.protoss_wall_pylon):
+            pylon_placement = self.main_base_ramp.protoss_wall_pylon
+        else:
+            random_building = self.structures({NEXUS, ASSIMILATOR, PYLON}).random
+            pylon_placement = await self.find_placement(PYLON, near=random_building.position, placement_step=5)
+#            pylon_placement = await self.find_placement(PYLON, near=nexus.position.towards(self.game_info.map_center, 5))
+            
+        # Building placement = Walling placement, then ... next to any pylon? 
+        # Production -> Any pylon, Tech -> Furthest from enemy base, defence structures -> Nearest to enemy base. Prioritize plugging the wall, but not with defences        
+        if self.structures(PYLON).ready:
+            pylon = self.structures(PYLON).ready.random
+            proxy = self.structures(PYLON).closest_to(self.enemy_start_locations[0])
+            hidden = self.structures(PYLON).furthest_to(self.enemy_start_locations[0])                
+            if await self.can_place(GATEWAY, self.main_base_ramp.protoss_wall_buildings[0]):
+                building_placement = self.main_base_ramp.protoss_wall_buildings[0]
+                tech_placement = self.main_base_ramp.protoss_wall_buildings[0]
+            elif await self.can_place(GATEWAY, self.main_base_ramp.protoss_wall_buildings[1]):
+                building_placement = self.main_base_ramp.protoss_wall_buildings[1]
+                tech_placement = self.main_base_ramp.protoss_wall_buildings[1]                
+            else:
+                building_placement = await self.find_placement(GATEWAY, near=pylon.position)
+                tech_placement = await self.find_placement(CYBERNETICSCORE, near=hidden.position)               
+            
+            defence_placement_small = await self.find_placement(SHIELDBATTERY, near=proxy.position)                
+            tech_placement_small = await self.find_placement(DARKSHRINE, near=hidden.position)
+            warpin_placement = await self.find_placement(WARPGATETRAIN_STALKER, near=proxy.position, placement_step = 1)
+        
+
         # Calculate rate of supply consumption to supply remaining and preemptively build a dynamic amount of supply. Stop once we reach the 200 supply cap.
         # TODO: Include pending supply from town halls into supply calculations.
-        # TODO: Intelligently choose pylon locations. Current behaviour: Put it within radius 5 of a nexus towards the center of the map
-        if (self.supply_left + self.already_pending(PYLON)*8) < supply_rate*self.SUPPLY_BUILD_TIME and self.supply_cap + self.already_pending(PYLON)*8 <200:
+        if (self.supply_left + self.already_pending(PYLON)*8) < supply_rate*self.SUPPLY_BUILD_TIME and (self.supply_cap + self.already_pending(PYLON)*8) <200:
             # Always check if you can afford something before you build it
             if self.can_afford(PYLON):
-                await self.build(PYLON, near=nexus.position.towards(self.game_info.map_center, 5))
+                await self.build(PYLON, near=pylon_placement)
 
-        # Train probe on nexuses that are undersaturated until worker cap
+        # Train probe on nexuses that are undersaturated until worker cap 
         if self.supply_workers + self.already_pending(PROBE) < min(self.townhalls.amount * 22, self.MAX_WORKERS) and nexus.is_idle:
             if self.can_afford(PROBE):
                 self.do(nexus.train(PROBE), subtract_cost=True, subtract_supply=True)
 
         # If we are about to reach saturation on existing town halls, expand        
-        # TODO: If it's too dangerous to expand, don't
         # TODO: Send worker to expansion location just in time for having money for town hall
         if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.NEXUS_BUILD_TIME >= (self.townhalls.ready.amount + self.already_pending(NEXUS))*22:
             if self.can_afford(NEXUS):
                 await self.expand_now()
-            else:
-                # If we need an expansion but don't have resources, save for it.
+            # If we need an expansion but don't have resources, save for it unless we are in danger
+            elif threat_level < 1.1:
                 save_resources = 1
         # If we have reached max workers and have a lot more minerals than gas, expand for more gas.
         elif self.supply_workers > self.MAX_WORKERS-10 and self.minerals > 2000 and self.minerals/max(self.vespene, 1) > 2 and self.already_pending(NEXUS) == 0:
-            if self.can_afford(NEXUS):
                 await self.expand_now()
             
+        # Build gas near completed nexuses once we have a cybercore (does not need to be completed)
+        # TODO: Have weightage on earlier gas for tech rush
+        if ((self.supply_workers + self.NEXUS_SUPPLY_RATE*self.GAS_BUILD_TIME) >= \
+        self.townhalls.ready.amount*16 + (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR))*3 \
+        and (self.structures(GATEWAY) or self.structures(WARPGATE))) \
+        or (self.MAX_WORKERS - self.supply_workers < 10 and (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR)) <= self.townhalls.ready.amount*2):
+            
+            for nexus in self.townhalls.ready:
+                vgs = self.vespene_geyser.closer_than(10, nexus)                
+                for vg in vgs:
+                    if not self.can_afford(ASSIMILATOR):
+                        break                    
+                    if not self.gas_buildings.closer_than(1,vg):
+                        worker = self.select_build_worker(vg.position)
+                        self.do(worker.build(ASSIMILATOR, vg), subtract_cost=True)
+                        self.do(worker.stop(queue=True))
+#                        
 
+                
+        # Calculate best unit to make        
+        future_unit_value = (mineral_rate + vespene_rate)
+        unit_score = np.zeros(len(self.own_army_race))
+        i = 0
+        for own_army in self.own_army_race:
+            future_own_units = pending_units.copy()        
+            future_own_units[i] += future_unit_value/(own_army.minerals + self.gas_value*own_army.vespene)
+            unit_score[own_army.id] = self.calculate_threat_level(self.own_army_race, self.all_army, self.enemy_army_race, self.known_enemy_units, future_own_units, future_enemy_units)
+            i += 1
 
         # Tech up
         # TODO: If we need a high-tech unit more quickly, have a weightage for tech-rushing that unit
         # TODO: Consider how much army we currently have to determine if it is safe to tech up.
         # TODO: Include every upgrade in the game, and consider how many of the unit we plan to use in the future (i.e. start charge before we have zealots if we want them soon)
-        warpgate_tech = [ARCHON, DARKTEMPLAR]
-        stargate_tech = [TEMPEST, CARRIER]
-        robo_tech = [COLOSSUS, DISRUPTOR]
-        [_, best_unit] = self.calculate_threat_level(self.own_army_race, self.all_army, self.enemy_army_race, self.known_enemy_units)
+        warpgate_tech = [ARCHON.id, DARKTEMPLAR.id]
+        stargate_tech = [TEMPEST.id, CARRIER.id]
+        robo_tech = [COLOSSUS.id, DISRUPTOR.id]
+        best_unit = np.argmin(unit_score)
         
         if self.structures(PYLON).ready:
             pylon = self.structures(PYLON).ready.random
@@ -605,7 +659,7 @@ class MacroBot(sc2.BotAI):
             if self.structures(GATEWAY).ready or self.structures(WARPGATE):
                 if not self.structures(CYBERNETICSCORE):
                     if self.can_afford(CYBERNETICSCORE) and self.already_pending(CYBERNETICSCORE) == 0:
-                        await self.build(CYBERNETICSCORE, near=pylon)
+                        await self.build(CYBERNETICSCORE, near=tech_placement)
                 else:
                     # If cybercore is ready, research warpgate
                     if (
@@ -618,18 +672,18 @@ class MacroBot(sc2.BotAI):
             
             # If we have no gateway, build gateway
             elif self.can_afford(GATEWAY) and self.structures(GATEWAY).amount == 0:
-                await self.build(GATEWAY, near=pylon)
+                await self.build(GATEWAY, near=building_placement)
             
             # Tech: Upgrade warpgate units                        
             if best_unit in warpgate_tech:
                 if self.structures(CYBERNETICSCORE).ready:
                     if not self.structures(TWILIGHTCOUNCIL):
                         if self.can_afford(TWILIGHTCOUNCIL) and self.already_pending(TWILIGHTCOUNCIL) == 0:
-                            await self.build(TWILIGHTCOUNCIL, near=pylon)
-                    
+                            await self.build(TWILIGHTCOUNCIL, near=tech_placement)
+                            
                     else:
-                        if self.structures(TWILIGHTCOUNCIL).ready:                                    
-                            twilight = self.structures(TWILIGHTCOUNCIL).ready.first                                
+                        if self.structures(TWILIGHTCOUNCIL).ready:
+                            twilight = self.structures(TWILIGHTCOUNCIL).ready.first
                             # If we have lots of zealot/stalker/adept, research charge/blink/glaives
                             if self.units(ZEALOT).amount > 5:
                                 if self.can_afford(RESEARCH_CHARGE) and self.already_pending_upgrade(CHARGE) == 0:
@@ -642,43 +696,43 @@ class MacroBot(sc2.BotAI):
                                 elif not self.can_afford(RESEARCH_BLINK):
                                     save_resources = 1
                             if self.units(ADEPT).amount > 5:
-                                if self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES) and self.already_pending_upgrade(ADEPTRESONATINGGLAIVES) == 0:
-                                    self.do(twilight.research(ADEPTRESONATINGGLAIVES))
+                                if self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES) and self.already_pending_upgrade(ADEPTPIERCINGATTACK) == 0:
+                                    self.do(twilight.research(ADEPTPIERCINGATTACK))
                                 elif not self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES):
                                     save_resources = 1
                                     
                             # If we want archons, build templar archives
-                            if best_unit == ARCHON and self.structures(TWILIGHTCOUNCIL).ready:
+                            if best_unit == ARCHON.id and self.structures(TWILIGHTCOUNCIL).ready:
                                 if not self.structures(TEMPLARARCHIVE):
                                     if self.can_afford(TEMPLARARCHIVE) and self.already_pending(TEMPLARARCHIVE) == 0:
-                                        await self.build(TEMPLARARCHIVE, near=pylon)
+                                        await self.build(TEMPLARARCHIVE, near=tech_placement)
                                         
                             # If we want DTs, build dark shrine
                             # TODO: Or if we are maxed out or if they have no detection
-                            if best_unit == DARKTEMPLAR and self.structures(TWILIGHTCOUNCIL).ready:
+                            if best_unit == DARKTEMPLAR.id and self.structures(TWILIGHTCOUNCIL).ready:
                                 if not self.structures(DARKSHRINE):
                                     if self.can_afford(DARKSHRINE) and self.already_pending(DARKSHRINE) == 0:
-                                        await self.build(DARKSHRINE, near=pylon)
+                                        await self.build(DARKSHRINE, near=tech_placement_small)
             
             # Tech: T3 stargate                                        
             if best_unit in stargate_tech:
                 if self.structures(STARGATE).ready:
                     if not self.structures(FLEETBEACON):
                         if self.can_afford(FLEETBEACON) and self.already_pending(FLEETBEACON) == 0:
-                            await self.build(FLEETBEACON, near=pylon)
+                            await self.build(FLEETBEACON, near=tech_placement)
                         elif not self.can_afford(FLEETBEACON):
                             save_resources = 1
                 # If we have no stargate, make one
                 elif not self.structures(STARGATE):
                     if self.can_afford(STARGATE) and self.already_pending(STARGATE) == 0:
-                        await self.build(STARGATE, near=pylon)
+                        await self.build(STARGATE, near=building_placement)
                         
             # Tech: T3 robo    
             if best_unit in robo_tech:                
                 if self.structures(ROBOTICSFACILITY).ready:
                     if not self.structures(ROBOTICSBAY):
                         if self.can_afford(ROBOTICSBAY) and self.already_pending(ROBOTICSBAY) == 0:
-                            await self.build(ROBOTICSBAY, near=pylon)
+                            await self.build(ROBOTICSBAY, near=tech_placement)
                         elif not self.can_afford(ROBOTICSBAY):
                             save_resources = 1
                     # Research thermal lance        
@@ -689,7 +743,7 @@ class MacroBot(sc2.BotAI):
                 # If we have no robo facility, make one
                 elif not self.structures(ROBOTICSFACILITY):
                     if self.can_afford(ROBOTICSFACILITY) and self.already_pending(ROBOTICSFACILITY) == 0:
-                        await self.build(ROBOTICSFACILITY, near=pylon)
+                        await self.build(ROBOTICSFACILITY, near=building_placement)
                 
             # Make detection if needed
             if self.need_detection and not self.have_detection and not self.already_pending(OBSERVER):
@@ -699,209 +753,118 @@ class MacroBot(sc2.BotAI):
                             self.do(rb.train(OBSERVER), subtract_cost=True, subtract_supply=True)
                 elif not self.structures(ROBOTICSFACILITY):
                     if self.can_afford(ROBOTICSFACILITY) and self.already_pending(ROBOTICSFACILITY) == 0:
-                        await self.build(ROBOTICSFACILITY, near=pylon) 
-#            
-#        if self.structures(PYLON).ready:
-#            pylon = self.structures(PYLON).ready.random
-#            if self.structures(GATEWAY).ready or self.structures(WARPGATE).ready:
-#                # If we have gateway completed, build cyber core
-#                if not self.structures(CYBERNETICSCORE):
-#                    if self.can_afford(CYBERNETICSCORE) and self.already_pending(CYBERNETICSCORE) == 0:
-#                        await self.build(CYBERNETICSCORE, near=pylon)
-#                else:
-#                    # If cybercore is ready, research warpgate
-#                    if (
-#                            self.structures(CYBERNETICSCORE).ready
-#                            and self.can_afford(RESEARCH_WARPGATE)
-#                            and self.already_pending_upgrade(WARPGATERESEARCH) == 0
-#                    ):
-#                        ccore = self.structures(CYBERNETICSCORE).ready.first
-#                        self.do(ccore(RESEARCH_WARPGATE), subtract_cost=True)
-#                    
-#                    # If we have lots of gateways, build twilight council
-#                    if (self.structures(GATEWAY).ready.amount+self.structures(WARPGATE).ready.amount+self.already_pending(GATEWAY)) >= 4:
-#                        if not self.structures(TWILIGHTCOUNCIL):
-#                            if self.can_afford(TWILIGHTCOUNCIL) and self.already_pending(TWILIGHTCOUNCIL) == 0:
-#                                await self.build(TWILIGHTCOUNCIL, near=pylon)
-#                        
-#                        else:
-#                            if self.structures(TWILIGHTCOUNCIL).ready:                                    
-#                                twilight = self.structures(TWILIGHTCOUNCIL).ready.first                                
-#                                # If we have lots of zealot/stalker/adept, research charge/blink/glaives
-#                                if self.units(ZEALOT).amount > 5:
-#                                    if self.can_afford(RESEARCH_CHARGE) and self.already_pending_upgrade(CHARGE) == 0:
-#                                        self.do(twilight.research(CHARGE))
-#                                    elif not self.can_afford(RESEARCH_CHARGE):
-#                                        save_resources = 1
-#                                if self.units(STALKER).amount > 5:
-#                                    if self.can_afford(RESEARCH_BLINK) and self.already_pending_upgrade(BLINKTECH) == 0:
-#                                        self.do(twilight.research(BLINKTECH))
-#                                    elif not self.can_afford(RESEARCH_BLINK):
-#                                        save_resources = 1
-#                                if self.units(ADEPT).amount > 5:
-#                                    if self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES) and self.already_pending_upgrade(ADEPTRESONATINGGLAIVES) == 0:
-#                                        self.do(twilight.research(ADEPTRESONATINGGLAIVES))
-#                                    elif not self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES):
-#                                        save_resources = 1
-#                                    
-#                            # If we have lots of vespene, build templar archives
-#                            if self.structures(TWILIGHTCOUNCIL).ready and self.vespene > 500:
-#                                if not self.structures(TEMPLARARCHIVE):
-#                                    if self.can_afford(TEMPLARARCHIVE) and self.already_pending(TEMPLARARCHIVE) == 0:
-#                                        await self.build(TEMPLARARCHIVE, near=pylon)
-#                                        
-#                            # If we have a big bank, build dark shrine
-#                            if self.structures(TWILIGHTCOUNCIL).ready and self.vespene > 750 and self.minerals > 750:
-#                                if not self.structures(DARKSHRINE):
-#                                    if self.can_afford(DARKSHRINE) and self.already_pending(DARKSHRINE) == 0:
-#                                        await self.build(DARKSHRINE, near=pylon)
-#                        
-#                    # If we have lots of stargates, build fleet beacon
-#                    if len(self.structures(STARGATE)) >= 2:
-#                        if not self.structures(FLEETBEACON):
-#                            if self.can_afford(FLEETBEACON) and self.already_pending(FLEETBEACON) == 0:
-#                                await self.build(FLEETBEACON, near=pylon)
-#                            elif not self.can_afford(FLEETBEACON):
-#                                save_resources = 1
-#                                
-#                    # If we have lots of robotics facilities, build robotics bay
-#                    if len(self.structures(ROBOTICSFACILITY)) >= 1:
-#                        if not self.structures(ROBOTICSBAY):
-#                            if self.can_afford(ROBOTICSBAY) and self.already_pending(ROBOTICSBAY) == 0:
-#                                await self.build(ROBOTICSBAY, near=pylon)
-#                            elif not self.can_afford(ROBOTICSBAY):
-#                                save_resources = 1
-#                        # Research thermal lance        
-#                        elif self.structures(ROBOTICSBAY).ready:
-#                            robobay = self.structures(ROBOTICSBAY).ready.first
-#                            if self.can_afford(RESEARCH_EXTENDEDTHERMALLANCE) and self.already_pending_upgrade(EXTENDEDTHERMALLANCE) == 0:
-#                                self.do(robobay.research(EXTENDEDTHERMALLANCE))
-                                
-#            else:
-#                # If we have no gateway, build gateway
-#                if self.can_afford(GATEWAY) and self.structures(GATEWAY).amount == 0:
-#                    await self.build(GATEWAY, near=pylon)
+                        await self.build(ROBOTICSFACILITY, near=building_placement)
         
-        # Build gas near completed nexuses once we have a cybercore (does not need to be completed)
-        # Have weightage on earlier gas for tech rush
-        if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.GAS_BUILD_TIME >= self.townhalls.ready.amount*16 + self.structures(ASSIMILATOR).amount*3 and self.structures(CYBERNETICSCORE) \
-        or self.MAX_WORKERS - self.supply_workers < 10:
-            for nexus in self.townhalls.ready:
-                vgs = self.vespene_geyser.closer_than(10, nexus)
-                for vg in vgs:
-                    if not self.can_afford(ASSIMILATOR):
-                        break
-
-                    worker = self.select_build_worker(vg.position)
-                    if worker is None:
-                        break
-
-                    if not self.gas_buildings or not self.gas_buildings.closer_than(1, vg):
-                        self.do(worker.build(ASSIMILATOR, vg), subtract_cost=True)
-                        self.do(worker.stop(queue=True))
+        
 
 
-        # If we don't need to save resources, make stuff
-        warp_try = 0
-        if save_resources == 0: # Be careful to make sure that save_resources is only asserted when we cannot afford something!
-            # Run through all our production buildings and make sure they are being used
-            # TODO: BUG: Available units are sometimes not registered, and seem to vary based on the units available, not just the existing armies.
-            # Stargate units
-            if self.structures(FLEETBEACON).ready:
-                self.available_stargate_units = [PHOENIX, ORACLE, VOIDRAY, TEMPEST, CARRIER]
-            else:
-                self.available_stargate_units = [PHOENIX, ORACLE, VOIDRAY]
-            [_, best_unit] = self.calculate_threat_level(self.available_stargate_units, self.all_army, self.enemy_army_race, self.known_enemy_units) 
-            for sg in self.structures(STARGATE).idle:
-                if self.can_afford(best_unit):
-                    self.do(sg.train(best_unit), subtract_cost=True, subtract_supply=True)
-            
-            # Robo units. TODO: Flag to produce observers and warp prism
-            if self.structures(ROBOTICSBAY).ready:
-                self.available_robo_units = [IMMORTAL, COLOSSUS, DISRUPTOR]
-                [_, best_unit] = self.calculate_threat_level(self.available_robo_units, self.all_army, self.enemy_army_race, self.known_enemy_units) 
-            else:
-                self.available_robo_units = [IMMORTAL]
-                best_unit = IMMORTAL
-            for rb in self.structures(ROBOTICSFACILITY).idle:
-                if self.can_afford(best_unit):
-                    self.do(rb.train(best_unit), subtract_cost=True, subtract_supply=True)
-            
-            # Warpgate units. Prioritize robo and stargate units.
-            self.available_warpgate_units = [ZEALOT]
-            if self.structures(CYBERNETICSCORE).ready:
-                self.available_warpgate_units.append(STALKER)
-                self.available_warpgate_units.append(SENTRY)
-                self.available_warpgate_units.append(ADEPT)
-            if self.structures(TEMPLARARCHIVE).ready:
-                self.available_warpgate_units.append(ARCHON)
-            if self.structures(DARKSHRINE).ready:
-                self.available_warpgate_units.append(DARKTEMPLAR)
-            [_, best_unit] = self.calculate_threat_level(self.available_warpgate_units, self.all_army, self.enemy_army_race, self.known_enemy_units) 
-            
-            if not self.structures(STARGATE).ready.idle and not self.structures(ROBOTICSFACILITY).ready.idle:                
-                if self.structures(PYLON).ready:
-                    proxy = self.structures(PYLON).closest_to(self.enemy_start_locations[0])
-                # TODO: Warp-in at power field closest to enemy, but at a minimum distance away. Include warp prism power fields.                    
-                for wg in self.structures(WARPGATE).ready:
-                    abilities = await self.get_available_abilities(wg)
-                    if AbilityId.WARPGATETRAIN_ZEALOT in abilities:
-                        pos = proxy.position.to2.random_on_distance(4)
-                        placement = await self.find_placement(WARPGATETRAIN_ZEALOT, pos, placement_step=1)
-                        while placement is None:
-                            # pick random other pylon
-                            proxy = self.structures(PYLON).random
-                            pos = proxy.position.to2.random_on_distance(4)
-                            placement = await self.find_placement(WARPGATETRAIN_ZEALOT, pos, placement_step=1)
-                            warp_try +=1
-                            if warp_try >= 5:
-                                break
-                            
-                        if best_unit == ARCHON:
-                            self.do(wg.warp_in(HIGHTEMPLAR, placement), subtract_cost=True, subtract_supply=True)
-                        else:
-                            self.do(wg.warp_in(best_unit, placement), subtract_cost=True, subtract_supply=True)
-                            
-                # If warp gate is not yet researched, use gateways. Warp gate research takes 100s, gateway units take ~30s to build, already_pending returns % completion, with 1 on completion
-                if self.already_pending_upgrade(WARPGATERESEARCH) < 0.7 :
-                    for gw in self.structures(GATEWAY).idle:
-                        if self.can_afford(STALKER):
-                            self.do(gw.train(STALKER), subtract_cost=True, subtract_supply = True)
-                # If all our production is not idle and we have more income than expenditure, add more production buildings. If we are supply capped, add production up to ~2x income rate
-                # TODO: Intelligent choices on which production buildings to make.
-                # TODO: Sim city placement
-                # Current behaviour: Balance out robo, stargate, warpgate in a 1:1:4 ratio when we want to spend minerals
-                self.available_units = self.available_warpgate_units
-                for unit in self.available_robo_units:
-                    self.available_units.append(unit)
-                for unit in self.available_stargate_units:
-                    self.available_units.append(unit)
+            # If we don't need to save resources, make stuff
+#            warp_try = 0
+            if (save_resources == 0 or self.minerals > 450): # Be careful to make sure that save_resources is only asserted when we cannot afford something!
+                # Run through all our production buildings and make sure they are being used
+                # Stargate units
+                if self.structures(FLEETBEACON).ready: #Taking out oracles until I figure out logic for their energy management
+                    available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id, CARRIER.id]
+                else:
+                    available_stargate_units = [PHOENIX.id, VOIDRAY.id]
+                best_unit = self.own_army_race[available_stargate_units[np.argmin(unit_score[available_stargate_units])]]
+                for sg in self.structures(STARGATE).idle:
+                    if self.can_afford(best_unit):
+                        self.do(sg.train(best_unit), subtract_cost=True, subtract_supply=True)
                 
-                if self.structures(PYLON).ready and self.structures(CYBERNETICSCORE).ready:
-                    pylon = self.structures(PYLON).ready.random                    
-                    # TODO: Dynamically modify income-expenditure ratio based on stage of the game (teching and expanding are not counted in expenditure but this is a significant cost early).
-                    if mineral_income*0.8 > mineral_rate or (self.supply_used > 190 and mineral_income*1.5 > mineral_rate):
-                        [_, best_unit] = self.calculate_threat_level(self.available_units, self.all_army, self.enemy_army_race, self.known_enemy_units) 
-                        if best_unit in self.available_warpgate_units:
-                            if self.can_afford(GATEWAY):
-                                await self.build(GATEWAY, near=pylon)
-                        if best_unit in self.available_robo_units:
-                            if self.can_afford(ROBOTICSFACILITY):
-                                await self.build(ROBOTICSFACILITY, near=pylon)
-                        if best_unit in self.available_stargate_units:
-                            if self.can_afford(STARGATE):
-                                await self.build(STARGATE, near=pylon)
+                # Robo units. TODO: Flag to produce observers and warp prism
+                if self.structures(ROBOTICSBAY).ready:
+                    available_robo_units = [IMMORTAL.id, COLOSSUS.id, DISRUPTOR.id]
+                    best_unit = self.own_army_race[available_robo_units[np.argmin(unit_score[available_robo_units])]]
+                else:
+                    available_robo_units = [IMMORTAL.id]
+                    best_unit = IMMORTAL
+                for rb in self.structures(ROBOTICSFACILITY).idle:
+                    if self.can_afford(best_unit):
+                        self.do(rb.train(best_unit), subtract_cost=True, subtract_supply=True)
+                
+                # Warpgate units. Prioritize robo and stargate units.
+                available_warpgate_units = [ZEALOT.id]
+                if self.structures(CYBERNETICSCORE).ready:
+                    available_warpgate_units.append(STALKER.id)
+                    available_warpgate_units.append(SENTRY.id)
+                    available_warpgate_units.append(ADEPT.id)
+                if self.structures(TEMPLARARCHIVE).ready:
+                    available_warpgate_units.append(ARCHON.id)
+                if self.structures(DARKSHRINE).ready:
+                    available_warpgate_units.append(DARKTEMPLAR.id)
+                best_unit = self.own_army_race[available_warpgate_units[np.argmin(unit_score[available_warpgate_units])]]
+                
+                if not self.structures(STARGATE).ready.idle and not self.structures(ROBOTICSFACILITY).ready.idle:                
+                    if self.structures(PYLON).ready:
+                        proxy = self.structures(PYLON).closest_to(self.enemy_start_locations[0])
+                    # TODO: Warp-in at power field closest to enemy, but at a minimum distance away. Include warp prism power fields.
+                    warp_ready = 0
+                    for wg in self.structures(WARPGATE).ready:
+                        abilities = await self.get_available_abilities(wg)
+                        if AbilityId.WARPGATETRAIN_ZEALOT in abilities:
+#                            pos = proxy.position.to2.random_on_distance(4)
+#                            placement = await self.find_placement(WARPGATETRAIN_ZEALOT, pos, placement_step=1)
+#                            while placement is None:
+#                                # pick random other pylon
+#                                proxy = self.structures(PYLON).random
+#                                pos = proxy.position.to2.random_on_distance(4)
+#                                placement = await self.find_placement(WARPGATETRAIN_ZEALOT, pos, placement_step=1)
+#                                warp_try +=1
+#                                if warp_try >= 5:
+#                                    break
+                                
+                            if best_unit == ARCHON and self.can_afford(HIGHTEMPLAR):
+                                self.do(wg.warp_in(HIGHTEMPLAR, warpin_placement), subtract_cost=True, subtract_supply=True)
+                            elif self.can_afford(best_unit):
+                                self.do(wg.warp_in(best_unit, warpin_placement), subtract_cost=True, subtract_supply=True)
+                            else:
+                                warp_ready += 1
+                                
+                    # If warp gate is not yet researched, use gateways. Warp gate research takes 100s, gateway units take ~30s to build, already_pending returns % completion, with 1 on completion
+                    if self.already_pending_upgrade(WARPGATERESEARCH) < 0.75 :
+                        for gw in self.structures(GATEWAY).idle:
+                            if self.can_afford(STALKER):
+                                self.do(gw.train(STALKER), subtract_cost=True, subtract_supply = True)
+                    # If all our production is not idle and we have more income than expenditure, add more production buildings. If we are supply capped, add production up to ~2x income rate                
+                    # TODO: We need to scout our opponent to decide how early we need defences.
+                    # Currently: Gateway->Nexus->Cyber->Stargate->Shield batteries
+                    # If we let the bot build production before cyber is started, it goes gateway->gateway->cyber->nexus->stargate and doesn't get shield batteries
+                    if not self.structures(GATEWAY).ready.idle and not warp_ready:# and self.structures(CYBERNETICSCORE):
+                        if not self.structures(CYBERNETICSCORE).ready:                            
+                            available_warpgate_units.append(STALKER.id)
+                            available_warpgate_units.append(SENTRY.id)
+                            available_warpgate_units.append(ADEPT.id)
+                        if self.structures(FLEETBEACON):
+                            available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id, CARRIER.id]
+                        if self.structures(ROBOTICSBAY):
+                            available_robo_units = [IMMORTAL.id, COLOSSUS.id, DISRUPTOR.id]
                             
-#                        if num_warpgates > 2*(num_stargates + num_robos):
-#                            if num_robos <= num_stargates or num_robos < 2:
-#                                if self.can_afford(ROBOTICSFACILITY):
-#                                    await self.build(ROBOTICSFACILITY, near=pylon)
-#                            else:
-#                                if self.can_afford(STARGATE):
-#                                    await self.build(STARGATE, near=pylon)
-#                        else:
-#                            if self.can_afford(GATEWAY):
-#                                await self.build(GATEWAY, near=pylon)
+                        available_units = available_warpgate_units                            
+                        if self.structures(CYBERNETICSCORE).ready:
+                            for unit in available_robo_units:
+                                available_units.append(unit)
+                            for unit in available_stargate_units:
+                                available_units.append(unit)
+                             
+                        # TODO: Dynamically modify income-expenditure ratio based on stage of the game (teching and expanding are not counted in expenditure but this is a significant cost early).
+                        
+                        if mineral_income*0.8 > mineral_rate or (threat_level > 1 and mineral_income > mineral_rate) or (self.supply_used > 190 and mineral_income*1.5 > mineral_rate):
+                            best_unit = self.own_army_race[available_units[np.argmin(unit_score[available_units])]]                            
+                            if best_unit.id in available_warpgate_units:
+                                if self.can_afford(GATEWAY):
+                                    await self.build(GATEWAY, near=building_placement)
+                            if best_unit.id in available_robo_units:
+                                if self.can_afford(ROBOTICSFACILITY):
+                                    await self.build(ROBOTICSFACILITY, near=building_placement)
+                            if best_unit.id in available_stargate_units:
+                                if self.can_afford(STARGATE):
+                                    await self.build(STARGATE, near=building_placement)
+                        # We've already added extra production and are using them, but they still have an advantage.                                
+                        elif threat_level > 1.1:
+                            if self.structures(SHIELDBATTERY).amount < min(((threat_level - 1.1)*10), 5):
+                                if self.can_afford(SHIELDBATTERY):
+                                    await self.build(SHIELDBATTERY, near=defence_placement_small)
                     
         # Debug info, print every minute
         if iteration%165 == 0:
