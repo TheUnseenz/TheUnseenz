@@ -103,7 +103,104 @@ class MacroBot(sc2.BotAI):
         
     # When an upgrade is complete/we notice an enemy upgrade completed, update unit stats by stats += amount.
 #    async def on_upgrade_complete(self, upgrade):
-    
+
+    # Inspired by RoachRush again
+    async def better_distribute_workers(self, resource_ratio = 3):
+        if not self.workers:
+            return
+        mineral_income = self.state.score.collection_rate_minerals
+        vespene_income = self.state.score.collection_rate_vespene
+        
+        excess_workers = self.workers.idle    
+        
+        # Find all oversaturated workers    
+        for base in self.townhalls.ready:
+            if base.surplus_harvesters > 0:
+                workers_on_minerals = self.workers.filter(
+                    lambda unit: not unit.is_carrying_resource and unit.order_target in self.mineral_field.tags and unit.distance_to_squared(base) < 100
+                )
+                if workers_on_minerals:
+                    for n in range(base.surplus_harvesters):
+                        # prevent crash by only taking the minimum
+                        worker = workers_on_minerals[min(n, workers_on_minerals.amount) - 1]
+                        excess_workers.append(worker)
+                        
+        # Oversaturated workers should be on minerals only
+        for gas in self.gas_buildings.ready:
+            if gas.surplus_harvesters > 0:
+                workers_in_gas = self.workers.filter(
+                    lambda unit: not unit.is_carrying_resource and unit.order_target == gas.tag
+                )
+                if workers_in_gas:
+                    for n in range(gas.surplus_harvesters):
+                        # prevent crash by only taking the minimum
+                        worker = workers_in_gas[min(n, workers_in_gas.amount) - 1]
+                        closest_mineral_patch = self.mineral_field.closest_to(worker)
+                        self.do(worker.gather(closest_mineral_patch))
+                        
+        
+        # Send oversaturated workers to fresh mineral fields
+        for base in self.townhalls.ready:
+            # Negative surplus harvesters indicates not enough workers
+            if base.surplus_harvesters < 0:
+                if excess_workers:
+                    for n in range(-base.surplus_harvesters):
+                        worker = excess_workers[min(n, excess_workers.amount) - 1]
+                        fresh_mineral_patch = self.mineral_field.closest_to(base)
+                        self.do(worker.gather(fresh_mineral_patch))
+            
+        # Check mineral-gas balance
+        if mineral_income/max(vespene_income,1) > resource_ratio:
+            # Not enough gas: Fill gas buildings
+            for gas in self.gas_buildings.ready:
+                # returns negative value if not enough workers
+                if gas.surplus_harvesters < 0:                    
+                    # Prioritize idle or oversaturated workers
+                    if excess_workers:
+                        # Gas should never have oversaturation
+                        for n in range(-gas.surplus_harvesters):
+                            worker = excess_workers[min(n, excess_workers.amount) - 1]
+                            self.do(worker.gather(gas))
+                    # If we don't have extra workers, grab some from minerals
+                    else:
+                        workers_on_minerals = self.workers.filter(
+                            lambda unit: not unit.is_carrying_resource and unit.order_target in self.mineral_field.tags
+                        )
+                        if workers_on_minerals:
+                            for n in range(-gas.surplus_harvesters):
+                                # prevent crash by only taking the minimum
+                                worker = workers_on_minerals[min(n, workers_on_minerals.amount) - 1]
+                                self.do(worker.gather(gas))
+        # Add hysterisis effect to avoid rubber banding
+        elif mineral_income/max(vespene_income,1) < resource_ratio*0.95: 
+            # Too much gas: Prioritize minerals
+            # TODO: Decide: It won't fill gas if we already have enough gas, even if we have excess workers. Should I send the excess workers to gas?
+            for base in self.townhalls.ready:
+                # returns negative value if not enough workers
+                if base.surplus_harvesters < 0:                    
+                    # Prioritize idle or oversaturated workers
+                    if excess_workers:
+                        # Oversaturation is fine on minerals if we don't have fresh bases
+                        for worker in excess_workers:
+                            fresh_mineral_patch = self.mineral_field.closest_to(base)
+                            self.do(worker.gather(fresh_mineral_patch))
+                    # If we don't have extra workers, grab some from minerals
+                    elif self.gas_buildings.ready:
+                        workers_in_gas = self.workers.filter(
+                            lambda unit: not unit.is_carrying_resource and unit.order_target in self.gas_buildings.tags
+                        )
+                        if workers_in_gas:
+                            for n in range(-base.surplus_harvesters):
+                                # prevent crash by only taking the minimum
+                                worker = workers_in_gas[min(n, workers_in_gas.amount) - 1]
+                                fresh_mineral_patch = self.mineral_field.closest_to(base)
+                                self.do(worker.gather(fresh_mineral_patch))
+        
+        
+        # Idle workers should mine minerals, even if its oversaturated.
+        for worker in self.workers.idle:
+            closest_mineral_patch = self.mineral_field.closest_to(self.townhalls.closest_to(worker))
+            self.do(worker.gather(closest_mineral_patch))
 
     def calculate_effective_dps(self, own_army, enemy_army):    
         # Effective DPS = Target own unit's efficiency at killing target enemy's unit. Efficiency defined by damage done vs cost of own unit vs cost of enemy unit.
@@ -556,9 +653,12 @@ class MacroBot(sc2.BotAI):
                     self.do(loop_nexus(EFFECT_CHRONOBOOSTENERGYCOST, nexus))
                     break
         # Distribute workers in gas and across bases
-        # TODO: Dynamically calculate ideal resource ratio based on the unit composition we want and our current bank
         if iteration%(self.ITERATIONS_PER_MINUTE/30) == 0:
-            await self.distribute_workers()
+            if vespene_rate:
+                resource_ratio = mineral_rate/vespene_rate
+            else:
+                resource_ratio = 4            
+            await self.better_distribute_workers(resource_ratio)
 
 
         # Choose building placement
@@ -631,7 +731,6 @@ class MacroBot(sc2.BotAI):
                         worker = self.select_build_worker(vg.position)
                         self.do(worker.build(ASSIMILATOR, vg), subtract_cost=True)
                         self.do(worker.stop(queue=True))
-#                        
 
                 
         # Calculate best unit to make        
