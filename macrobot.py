@@ -520,7 +520,8 @@ class MacroBot(sc2.BotAI):
         num_warpgates = (self.structures(WARPGATE).amount + self.structures(GATEWAY).ready.amount + self.already_pending(GATEWAY))
         num_stargates = (self.structures(STARGATE).ready.amount + self.already_pending(STARGATE))
         num_robos = (self.structures(ROBOTICSFACILITY).ready.amount + self.already_pending(ROBOTICSFACILITY))
-        
+        num_production = num_warpgates + num_stargates + num_robos
+	
         # Once we are nearing worker cap, remove them from the resource consumption rate.
         if self.supply_workers >= self.MAX_WORKERS - 10: 
             supply_rate = num_warpgates*self.WARPGATE_SUPPLY_RATE + num_stargates*self.STARGATE_SUPPLY_RATE + num_robos*self.ROBO_SUPPLY_RATE            
@@ -531,7 +532,7 @@ class MacroBot(sc2.BotAI):
             mineral_rate = (num_warpgates*self.WARPGATE_MINERAL_RATE + num_stargates*self.STARGATE_MINERAL_RATE + num_robos*self.ROBO_MINERAL_RATE \
             + len(self.structures(NEXUS).ready)*self.NEXUS_MINERAL_RATE + supply_rate*100/8)*60
         vespene_rate = (num_warpgates*self.WARPGATE_VESPENE_RATE + num_stargates*self.STARGATE_VESPENE_RATE + num_robos*self.ROBO_VESPENE_RATE)*60
-        
+	ideal_gas_buildings = math.floor(vespene_rate/160) + 1
         save_resources = 0
         
         # Track known enemy units and structures. Updated whenever we see new units and removed whenever they die in vision.
@@ -705,23 +706,21 @@ class MacroBot(sc2.BotAI):
 
         # If we are about to reach saturation on existing town halls, expand        
         # TODO: Send worker to expansion location just in time for having money for town hall
-        if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.NEXUS_BUILD_TIME >= (self.townhalls.ready.amount + self.already_pending(NEXUS))*22:
+        if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.NEXUS_BUILD_TIME >= \
+        (self.townhalls.ready.amount + self.already_pending(NEXUS))*16 + max(ideal_gas_buildings, self.townhalls.amount*2)*3:
             if self.can_afford(NEXUS):
                 await self.expand_now()
             # If we need an expansion but don't have resources, save for it unless we are in danger
-            elif threat_level < 1.1:
+            elif self.threat_level < 1.1:
                 save_resources = 1
         # If we have reached max workers and have a lot more minerals than gas, expand for more gas.
-        elif self.supply_workers > self.MAX_WORKERS-10 and self.minerals > 2000 and self.minerals/max(self.vespene, 1) > 2 and self.already_pending(NEXUS) == 0:
-                await self.expand_now()
+        elif self.supply_workers > self.MAX_WORKERS-10 and self.minerals > 1000 and ideal_gas_buildings > self.townhalls.amount*2 and self.already_pending(NEXUS) == 0:
+            await self.expand_now()
             
         # Build gas near completed nexuses once we have a cybercore (does not need to be completed)
         # TODO: Have weightage on earlier gas for tech rush
-        if ((self.supply_workers + self.NEXUS_SUPPLY_RATE*self.GAS_BUILD_TIME) >= \
-        self.townhalls.ready.amount*16 + (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR))*3 \
-        and (self.structures(GATEWAY) or self.structures(WARPGATE))) \
-        or (self.MAX_WORKERS - self.supply_workers < 10 and (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR)) <= self.townhalls.ready.amount*2):
-            
+        
+        if (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR)) < ideal_gas_buildings and num_production:
             for nexus in self.townhalls.ready:
                 vgs = self.vespene_geyser.closer_than(10, nexus)                
                 for vg in vgs:
@@ -731,6 +730,7 @@ class MacroBot(sc2.BotAI):
                         worker = self.select_build_worker(vg.position)
                         self.do(worker.build(ASSIMILATOR, vg), subtract_cost=True)
                         self.do(worker.stop(queue=True))
+                        break
 
                 
         # Calculate best unit to make        
@@ -939,6 +939,23 @@ class MacroBot(sc2.BotAI):
                         if self.structures(ROBOTICSBAY):
                             available_robo_units = [IMMORTAL.id, COLOSSUS.id, DISRUPTOR.id]
                             
+			# Update resource spending rate to be based on what units we are making
+                        # Stargate:
+                        self.best_unit = self.own_army_race[available_stargate_units[np.argmin(self.unit_score[available_stargate_units])]]
+                        self.STARGATE_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
+                        self.STARGATE_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
+                        self.STARGATE_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time
+                        # Robo:
+                        self.best_unit = self.own_army_race[available_robo_units[np.argmin(self.unit_score[available_robo_units])]]
+                        self.ROBO_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
+                        self.ROBO_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
+                        self.ROBO_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time           
+                        # Warpgate: 
+                        self.best_unit  = self.own_army_race[available_warpgate_units[np.argmin(self.unit_score[available_warpgate_units])]]
+                        self.WARPGATE_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
+                        self.WARPGATE_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
+                        self.WARPGATE_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time
+			
                         available_units = available_warpgate_units                            
                         if self.structures(CYBERNETICSCORE).ready:
                             for unit in available_robo_units:
@@ -946,7 +963,6 @@ class MacroBot(sc2.BotAI):
                             for unit in available_stargate_units:
                                 available_units.append(unit)
                              
-                        # TODO: Dynamically modify income-expenditure ratio based on stage of the game (teching and expanding are not counted in expenditure but this is a significant cost early).
                         
                         if mineral_income*0.8 > mineral_rate or (threat_level > 1 and mineral_income > mineral_rate) or (self.supply_used > 190 and mineral_income*1.5 > mineral_rate):
                             best_unit = self.own_army_race[available_units[np.argmin(unit_score[available_units])]]                            
