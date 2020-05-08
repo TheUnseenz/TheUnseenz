@@ -426,21 +426,66 @@ class TheUnseenz(sc2.BotAI):
     def scout_map(self, priority = 'Enemy'):
         # Assigns the next scouting location when called. This scouting location will change each time it is called, so only call it once for idle units! Spamming this will result in spazzing.
         # Input priority 'Enemy' or 'Map'
-        # If priority is enemy, searches expansions in order of closest to enemy main (including the main)
-        # If priority is map, searches expansions in order of closest to us (not including our taken bases)
-        # Credit to RoachRush
+        # If priority is enemy, searches enemy owned expansions in order of closest to enemy main (including the main)
+        # If priority is map, searches non-owned expansions in order of closest to us (excludes all taken bases)
+        # Inspired by RoachRush
         if priority == 'Enemy':
+            # If we don't have the list of bases, make one
             if not self.scout_enemy:
-                self.scout_enemy = itertools.cycle(self.ordered_expansions_enemy)
-            self.scout_enemy_next = next(self.scout_enemy)
+                self.scout_enemy = iter(self.ordered_expansions_enemy)
+            self.scout_enemy_next = next(self.scout_enemy, 0)
+            # If we have exhausted our list, recreate the list, updated for any new/removed bases.
+            if not self.scout_enemy_next:
+                self.scout_enemy = iter(self.ordered_expansions_enemy)
+                self.scout_enemy_next = next(self.scout_enemy, 0)
             scout_location = self.scout_enemy_next
         if priority == 'Map':
             if not self.clear_map:
                 # start with enemy starting location, then cycle through all expansions
-                self.clear_map = itertools.cycle(self.ordered_expansions)
-            self.clear_map_next = next(self.clear_map)
+                self.clear_map = iter(self.ordered_expansions)
+            self.clear_map_next = next(self.clear_map, 0)
+            if not self.clear_map_next:
+                self.clear_map = iter(self.ordered_expansions)
+                self.clear_map_next = next(self.clear_map, 0)                                      
             scout_location = self.clear_map_next
         return scout_location
+    
+    def move_circle(self, cycle = 0, radius = 10):
+        # Returns a point around a circle each time this function is called. Starts at (radius, 0) and goes counter clockwise.
+        # Sight range of worker is 8
+        num_points = 16
+        degree = 2*math.pi*cycle
+        circle = (radius*math.cos(degree), radius*math.sin(degree))
+        cycle += 1/num_points
+        return [circle, cycle]
+    
+    def send_scout(self, scouting_unit):
+        # Assigns the given unit to scout the enemies base. It will run a circle around each of their bases in order until it dies.
+        # Input scouting unit must be global (self.scout) or it won't work.
+        # TODO: If it survives a full scout, bring it home.
+        try: 
+            # If these attributes are not yet defined, define them.
+            scouting_unit.next_base
+            scouting_unit.cycle
+            scouting_unit.next_location
+        except:
+            scouting_unit.next_base = self.scout_map(priority = 'Enemy')
+            [circle, scouting_unit.cycle] = self.move_circle()
+            # Circle starts from 1/num_points, not 0.
+            scouting_unit.next_location = scouting_unit.next_base + circle
+        # Remember: scouting_unit is a snapshot of the unit's properties, and this is why we need to search for units with scouting_unit's tag!
+        if self.units.find_by_tag(scouting_unit.tag):
+            self.last_scout = self.time
+            scout = self.units.find_by_tag(scouting_unit.tag)
+            if scout.distance_to_squared(scouting_unit.next_location) < 25:
+                [circle, scouting_unit.cycle] = self.move_circle(scouting_unit.cycle)
+                scouting_unit.next_location = scouting_unit.next_base + circle
+                # If we have completed a circle around this base, move to the next base.
+                if scouting_unit.cycle % 1 == 0:
+                    scouting_unit.next_base = self.scout_map(priority = 'Enemy')
+                
+            if not scout.order_target == scouting_unit.next_location:        
+                self.do(scout.move(scouting_unit.next_location))
     
     # Removes destroyed units from known_enemy_units and known_enemy_structures. Seems to work. Will not register units dying in fog as dead, how do we deal with this?
     async def on_unit_destroyed(self, unit_tag):
@@ -613,6 +658,13 @@ class TheUnseenz(sc2.BotAI):
         | self.enemy_structures.exclude_type({MISSILETURRET, PLANETARYFORTRESS, PHOTONCANNON, SPINECRAWLER, SPORECRAWLER})
         if self.all_army:
             army_center = self.all_army.center
+	
+	# Worker scout on gateway start
+        if self.structures(GATEWAY) and not self.worker_scout:
+            self.worker_scout = self.units(PROBE).closest_to(self.enemy_start_locations[0])
+            
+        elif self.worker_scout:
+            self.send_scout(self.worker_scout)
         for army in self.all_army:            
             if army not in self.units(HIGHTEMPLAR): # Don't touch HTs until they morph archons/I make logic for spellcasting!
                 if targets:
