@@ -86,6 +86,14 @@ class TheUnseenz(sc2.BotAI):
         self.enemy_time_to_kill = None
         self.enemy_time_to_reach = None
         
+	self.enemy_minerals_mined = 50
+        self.enemy_vespene_mined = 0
+        self.enemy_minerals_spent = 0
+        self.enemy_vespene_spent = 0
+        self.enemy_minerals = 50 
+        self.enemy_vespene = 0
+        
+        self.last_scout = 0
         self.last_army_supply = 0
         self.last_known_enemy_amount = 0
         self.threat_level = 1
@@ -493,6 +501,32 @@ class TheUnseenz(sc2.BotAI):
         self.known_enemy_structures = self.known_enemy_structures.filter(lambda unit: unit.tag != unit_tag)
 #        print(len(self.known_enemy_units))    
 #        print(len(self.known_enemy_structures))
+
+    async def on_enemy_unit_entered_vision(self, unit):
+        unit.last_update = self.time
+        
+    async def on_enemy_unit_left_vision(self, unit_tag):
+        if self.known_enemy_units.find_by_tag(unit_tag):
+            unit = self.known_enemy_units.find_by_tag(unit_tag)
+            unit.last_update = self.time
+        elif self.known_enemy_structures.find_by_tag(unit_tag):
+            unit = self.known_enemy_structures.find_by_tag(unit_tag)
+            unit.last_update = self.time
+        
+            
+    async def on_building_construction_complete(self, unit):
+        if unit in self.townhalls:
+            fresh_mineral_patch = self.mineral_field.closest_to(unit)
+            self.do(unit.smart(fresh_mineral_patch))
+            await self.better_distribute_workers(self.resource_ratio)
+        
+        if unit in self.gas_buildings:
+            await self.better_distribute_workers(self.resource_ratio)
+            
+    async def on_building_construction_started(self, unit):
+        if unit in self.structures({CYBERNETICSCORE,FLEETBEACON,ROBOTICSBAY,TEMPLARARCHIVE,DARKSHRINE}):
+            await self.better_distribute_workers(self.resource_ratio)
+
             
     async def on_step(self, iteration):
         if iteration == 0:
@@ -596,18 +630,221 @@ class TheUnseenz(sc2.BotAI):
         
         save_resources = 0
         
+	# Count enemy expenditure. As we aren't given any information on enemy upgrades, the cost of upgrades will be ignored.
+        for unit in self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units and not unit.is_snapshot):
+            # First 12 workers and zerg's first overlord are free.
+            unit.last_update = self.time
+            if not ((unit in self.enemy_units({SCV, PROBE, DRONE}) and self.known_enemy_units({SCV, PROBE, DRONE}).amount <= 12) or \
+                    (unit in self.enemy_units(OVERLORD) and self.known_enemy_units(OVERLORD).amount < 1)):
+                self.enemy_minerals_spent += self.calculate_unit_value(unit.type_id).minerals
+                self.enemy_vespene_spent += self.calculate_unit_value(unit.type_id).vespene
+        for structure in self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures and not unit.is_snapshot):
+            # First townhall is free
+            structure.last_update = self.time
+            if not (structure in self.enemy_structures({NEXUS, COMMANDCENTER, HATCHERY}) and self.enemy_structures({NEXUS, COMMANDCENTER, HATCHERY}).amount <= 1):
+                self.enemy_minerals_spent += self.calculate_unit_value(structure.type_id).minerals
+                self.enemy_vespene_spent += self.calculate_unit_value(structure.type_id).vespene
+        # Track known enemy units and structures. Updated whenever we see new units and removed whenever they die in vision.
+        self.known_enemy_units += self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units)
+        self.known_enemy_structures += self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures)
+        
+	# Track enemy resources
+        # Will not include the cost of the drone for zerg buildings (we might not see the worker that was used)
+        # Will only recognize lost mining time after seeing the mineral fields (especially relevant vs terran)
+        # Will not model mule mining rate, but upon seeing more minerals being mined from the mineral patch, will retroactively add that in.
+        townhalls = {NEXUS, COMMANDCENTER, ORBITALCOMMAND, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
+        num_townhalls = max(len(self.enemy_structures(townhalls)),1)
+        self.enemy_minerals_mined = 50 # Initial base which will be deducted later.
+        self.enemy_vespene_mined = 0
+        for base in self.enemy_expansions:
+            # Initialize each base to have available resources equal to the snapshots of the known resources nearby. 
+            # If we see that the resources have been mined out before we see the expansion location, it will count the resources incorrectly and think much less resources were mined.
+            try:
+                base.minerals_available
+                base.vespene_available
+                base.saturated_mineral_time
+                base.saturated_vespene_time
+            except:
+                base.minerals_available = len(self.mineral_field.closer_than(10,base))*1350 # Each base has half 900, half 1800 mineral fields. Regular has 8 mineral fields, gold bases have 6.
+                base.vespene_available = len(self.vespene_geyser.closer_than(10,base))*2250                
+                base.saturated_mineral_time = 0
+                base.saturated_vespene_time = 0
+            # Update our last seen time of the enemy base. If it is under construction, instead use the estimated completion time. 
+            # If terran floats a CC into the expansion, it will only register the base as taken upon seeing the CC in the expansion (generally acceptable, as it may be a long while).
+            if self.is_visible(base):
+                eta = (1 - self.enemy_structures(townhalls).closest_to(base).build_progress)*71
+                base.last_update = self.time + eta
+            # Ignore bases that aren't complete yet
+            if base.last_update > self.time:
+                continue
+            mineral_fields = self.mineral_field.closer_than(10,base)
+            vespene_geysers = self.vespene_geyser.closer_than(10,base)
+            known_mineral_fields = self.known_minerals.closer_than(10,base)
+            known_vespene_geysers = self.known_gas.closer_than(10,base)
+            # TODO: If we scout that they have less workers than we anticipated, lower the resource mined value retroactively.
+            max_workers_minerals = len(mineral_fields)*2
+            max_workers_vespene = len(vespene_geysers)*3
+            max_workers = max_workers_minerals + max_workers_vespene
+            # TODO: What if we scout 1 worker of a fully saturated base, then our scout dies before seeing the rest?
+            if self.known_enemy_units({SCV, PROBE, DRONE}):
+                known_workers_mining = (self.known_enemy_units({SCV, PROBE, DRONE}).closer_than(10,base))
+                num_known_workers_mining = len(known_workers_mining)
+                # TODO: Townhalls in progress do not yet contribute to worker production. If many bases are unsaturated, they should be filled evenly (currently n times too fast)
+                # TODO: Cleanup this mess of a function. 12 workers + enemy town halls, but assume minimum 1 (initial base)*elapsed time/worker build rate.
+                # Base.last_update can be negative (not completed). Cap at max workers.                 
+                if (known_workers_mining):
+                    random_worker = known_workers_mining.random
+                    num_workers_mining = math.floor(min(num_known_workers_mining + num_townhalls*(self.time-random_worker.last_update)/12,max_workers))
+                else:
+                    num_workers_mining = math.floor(min(num_townhalls*(self.time-base.last_update)/12,max_workers))
+            # Assume constant worker production from all bases (includes macro hatches/orbitals) until saturation.
+            elif base in self.enemy_start_locations:
+                num_known_workers_mining = 12 # Starting worker count
+                num_workers_mining = math.floor(min((12 + num_townhalls*(self.time-base.last_update)/12),max_workers))
+            else:
+                num_known_workers_mining = 0 # We somehow saw an expansion but no workers, so assume this expansions is empty.
+                num_workers_mining = math.floor(min((num_townhalls*(self.time-base.last_update)/12),max_workers))
+                
+            # Estimate time to saturate
+            if num_workers_mining < max_workers_minerals:  
+                worker_deficit = max_workers_minerals - num_workers_mining
+                base.saturated_mineral_time = self.time + worker_deficit*12/num_townhalls
+                
+            if num_workers_mining < max_workers_minerals + max_workers_vespene:
+                worker_deficit = max_workers_minerals + max_workers_vespene - num_workers_mining
+                base.saturated_vespene_time = self.time + worker_deficit*12/num_townhalls
+            # Making workers costs money, deduct their presume spent money on workers. 
+            self.enemy_minerals_mined -= (num_workers_mining - num_known_workers_mining)*50
+            # Estimate mining rate. Assume minerals are filled, then gas following what most people do.
+            mineral_mining_rate = (660/8)/60 # Mining rate per mineral patch. x1.4 for gold.
+            vespene_mining_rate = 114/60 # Mineral rate per gas. x2 for purple.
+            average_workers_minerals = (min(num_known_workers_mining, max_workers_minerals) + min(num_workers_mining, max_workers_minerals))/2
+            average_workers_vespene = (min(max(num_known_workers_mining - max_workers_minerals,0),max_workers_vespene)\
+                                       + min(max(num_workers_mining - max_workers_minerals,0),max_workers_vespene))/2
+
+            # Mineral mining
+            i = 0
+            self.enemy_minerals_mined += base.minerals_available            
+            small_minerals = 0
+            large_minerals = 0
+            for mineral in mineral_fields:
+                # If we have seen it before, use last known mineral count.
+                try: # We have seen the mineral field before
+                    # Update the last time we saw the mineral field                    
+                    if self.is_visible(known_mineral_fields[i].position):
+                        self.known_minerals.remove(known_mineral_fields[i])
+                        for mineral in self.mineral_field.filter(lambda mineral: mineral not in self.known_minerals and not mineral.is_snapshot):
+                            mineral.last_update = self.time
+                        self.known_minerals += self.mineral_field.filter(lambda mineral: mineral not in self.known_minerals and not mineral.is_snapshot)                    
+                    # Last known mined contents
+                    self.enemy_minerals_mined -= known_mineral_fields[i].mineral_contents
+                    # NOTE: If minerals mined goes negative by thousands, it means the code crashed somewhere below this line.
+                    # Estimated further contents mined. Using trapezoidal rule
+                    if base.saturated_mineral_time > self.time:
+                        estimated_enemy_minerals_mined = (self.time - known_mineral_fields[i].last_update)\
+                        *mineral_mining_rate*average_workers_minerals/max_workers_minerals
+                    else:
+                        estimated_enemy_minerals_mined = (base.saturated_mineral_time - known_mineral_fields[i].last_update)\
+                        *mineral_mining_rate*average_workers_minerals/max_workers_minerals
+                        estimated_enemy_minerals_mined += (self.time - base.saturated_mineral_time)*mineral_mining_rate
+                        
+                        
+                    # Gold bases mine minerals 1.4x faster
+                    if known_mineral_fields[i].name.find('Rich') == -1:
+                        self.enemy_minerals_mined += estimated_enemy_minerals_mined
+                    else:
+                        self.enemy_minerals_mined += 1.4*estimated_enemy_minerals_mined
+                    
+                    # Count no. of small and large minerals
+                    # Small mineral fields have "750" in their name despite holding 900 because Blizzard
+                    if known_mineral_fields[i].name.find('750') == -1: 
+                        large_minerals += 1
+                    else:
+                        small_minerals += 1
+                except: # We have never seen the mineral field
+                    # Assume the mineral is being mined since the base creation.
+                    if large_minerals < small_minerals:
+                        self.enemy_minerals_mined -= 1800 # Large mineral fields hold 1800.
+                        large_minerals += 1
+                    else:
+                        self.enemy_minerals_mined -= 900 # Small mineral fields hold 900.
+                        small_minerals += 1
+                        
+                    # Estimated further contents mined. Using trapezoidal rule
+                    if base.saturated_mineral_time > self.time:
+                        estimated_enemy_minerals_mined = (self.time - base.last_update)*mineral_mining_rate*average_workers_minerals/max_workers_minerals
+                    else:
+                        estimated_enemy_minerals_mined = (base.saturated_mineral_time - base.last_update)*mineral_mining_rate*average_workers_minerals/max_workers_minerals
+                        estimated_enemy_minerals_mined += (self.time - base.saturated_mineral_time)*mineral_mining_rate
+                        
+                    # Gold bases mine minerals 1.4x faster
+                    if mineral.name.find('Rich') == -1:
+                        self.enemy_minerals_mined += estimated_enemy_minerals_mined
+                    else:
+                        self.enemy_minerals_mined += 1.4*estimated_enemy_minerals_mined
+                finally:
+                    i += 1
+                    
+            # Gas mining        
+            i = 0
+            self.enemy_vespene_mined += base.vespene_available            
+            for vespene in vespene_geysers:
+                # If we have seen it before, use last known gas count. 
+                try: # We have seen the vespene geyser before
+                    # Update the last time we saw the geyser
+                    if self.is_visible(known_vespene_geysers[i].position):
+                        self.known_gas.remove(known_vespene_geysers[i])
+                        for gas in self.vespene_geyser.filter(lambda gas: gas not in self.known_gas and not gas.is_snapshot):
+                            gas.last_update = self.time
+                        self.known_gas += self.vespene_geyser.filter(lambda gas: gas not in self.known_gas and not gas.is_snapshot)
+                    # Last known mined contents
+                    self.enemy_vespene_mined -= known_vespene_geysers[i].vespene_contents
+                    # NOTE: If vespene mined goes negative by a few thousand, it means the code crashed somewhere below this line.
+                    # Estimated further contents mined. Using trapezoidal rule
+                    if base.saturated_vespene_time > self.time:
+                        estimated_enemy_vespene_mined = (self.time - known_vespene_geysers[i].last_update)\
+                        *vespene_mining_rate*average_workers_vespene/max_workers_vespene
+                    else:
+                        estimated_enemy_vespene_mined = (base.saturated_vespene_time - known_vespene_geysers[i].last_update)\
+                        *vespene_mining_rate*average_workers_vespene/max_workers_vespene
+                        estimated_enemy_vespene_mined += (self.time - base.saturated_vespene_time)*vespene_mining_rate
+                        
+                    # Gold bases mine gas 2x faster
+                    if known_vespene_geysers[i].name.find('Rich') == -1:
+                        self.enemy_vespene_mined += estimated_enemy_vespene_mined
+                    else:
+                        self.enemy_vespene_mined += 2*estimated_enemy_vespene_mined
+                    
+                except: # We have never seen the vespene geyser
+                    # Assume gas is mined only after mineral saturation, following what most players do.
+                    self.enemy_vespene_mined -= 2250
+                        
+                    # Estimated further contents mined. Using trapezoidal rule
+                    if base.saturated_vespene_time > self.time:
+                        estimated_enemy_vespene_mined = (self.time - base.last_update)*vespene_mining_rate\
+                        *vespene_mining_rate*average_workers_vespene/max_workers_vespene
+                    else:
+                        estimated_enemy_vespene_mined = (base.saturated_vespene_time - base.last_update)*vespene_mining_rate\
+                        *vespene_mining_rate*average_workers_vespene/max_workers_vespene
+                        estimated_enemy_vespene_mined += (self.time - base.saturated_vespene_time)*vespene_mining_rate
+                        
+                    # Gold bases mine gas 2x faster
+                    if mineral.name.find('Rich') == -1:
+                        self.enemy_vespene_mined += estimated_enemy_vespene_mined
+                    else:
+                        self.enemy_vespene_mined += 2*estimated_enemy_vespene_mined
+                finally:
+                    i += 1                    
+        self.enemy_minerals = self.enemy_minerals_mined - self.enemy_minerals_spent
+        self.enemy_vespene = self.enemy_vespene_mined - self.enemy_vespene_spent
+	
         # Track our units
         self.all_army = self.units.not_structure - self.units(PROBE) - self.units(INTERCEPTOR)    
         pending_units = np.zeros(len(self.own_army_race))
         for own_army in self.own_army_race:
             pending_units[own_army.id] = self.already_pending(own_army)
         future_own_units = pending_units
-        
-        # Track known enemy units and structures. Updated whenever we see new units and removed whenever they die in vision.
-        self.known_enemy_units += self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units)
-        self.known_enemy_structures += self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures)
-        
-            
+	
         # Determine if we need detection for enemy cloaked/burrowed units
         # DECIDE: What about burrow roaches? Baneling bombs? Should we preemptively build detection for tech lab starports? What about for clearing creep?
         if self.known_enemy_structures.of_type(STARPORT):
@@ -1072,9 +1309,11 @@ class TheUnseenz(sc2.BotAI):
                             if (self.structures(SHIELDBATTERY).amount + self.already_pending(SHIELDBATTERY)) < min(((self.threat_level - 1.2)*5), 5):
                                 if self.can_afford(SHIELDBATTERY):
                                     await self.build(SHIELDBATTERY, near=defence_placement_small)
-                        
-        self.last_army_supply = self.supply_army
-        self.last_known_enemy_amount = len(self.known_enemy_units)
+        
+	# Update frequency for threat level and ideal unit calculations
+        if iteration%20 == 0:
+            self.last_army_supply = self.supply_army
+            self.last_known_enemy_amount = len(self.known_enemy_units)
         # Debug info, print every minute
         if iteration%165 == 0:
             print("Income")
