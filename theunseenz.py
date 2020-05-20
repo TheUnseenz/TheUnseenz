@@ -38,6 +38,7 @@ from sc2 import Race, Difficulty
 from sc2.constants import *
 from sc2.player import Bot, Computer, Human
 from unit_list import unit_list
+#from timeit import default_timer as timer
 
 
 
@@ -53,8 +54,8 @@ class TheUnseenz(sc2.BotAI):
         self.GAS_BUILD_TIME = 21
         self.NEXUS_MINERAL_RATE = 50/12
         self.NEXUS_SUPPLY_RATE = 1/12
-        self.PI = 3.14
-        self.gas_value = 2.5 # TODO: Find the best gas_value!
+        self.gas_value = 3 # TODO: Find the best gas_value!
+        self.resource_ratio = 3
         self.own_army_race = None
         self.enemy_army_race = None
         # Production resource rate is currently average resource of unit/build time i.e. resource per second. Excluded units: Oracle, Observer, Warp prism
@@ -76,6 +77,7 @@ class TheUnseenz(sc2.BotAI):
         self.need_utility = False
         
         self.ordered_expansions = None
+        self.enemy_expansions = None
         self.scout_enemy = None
         self.scout_enemy_next = None
         self.clear_map = None
@@ -86,7 +88,7 @@ class TheUnseenz(sc2.BotAI):
         self.enemy_time_to_kill = None
         self.enemy_time_to_reach = None
         
-	self.enemy_minerals_mined = 50
+        self.enemy_minerals_mined = 50
         self.enemy_vespene_mined = 0
         self.enemy_minerals_spent = 0
         self.enemy_vespene_spent = 0
@@ -96,9 +98,14 @@ class TheUnseenz(sc2.BotAI):
         self.last_scout = 0
         self.last_army_supply = 0
         self.last_known_enemy_amount = 0
+        self.enemy_army_value = [0, 0]
         self.threat_level = 1
         self.unit_score = None
-        self.best_unit = 0
+        self.best_unit = STALKER
+        self.best_stargate_unit = VOIDRAY
+        self.best_robo_unit = IMMORTAL
+        self.best_warpgate_unit = STALKER
+        self.worker_scout = None 
         # Terran: Note that many units have different forms and each form has a different unit name! -> Hellion/Hellbat, Widow mine, Siege tank, Viking, Liberator
         # Excluded units: Raven
         self.terran_army = [MARINE, MARAUDER, REAPER, GHOST, HELLION, HELLIONTANK, WIDOWMINE, SIEGETANK, SIEGETANKSIEGED, CYCLONE, THOR, THORAP, VIKINGFIGHTER, VIKINGASSAULT, \
@@ -120,10 +127,11 @@ class TheUnseenz(sc2.BotAI):
         vespene_income = self.state.score.collection_rate_vespene
         
         excess_workers = self.workers.idle    
-        
-        # Find all oversaturated workers    
+        set_rally = []
+        # Find all oversaturated workers and bases 
         for base in self.townhalls.ready:
             if base.surplus_harvesters > 0:
+                set_rally.append(base)
                 workers_on_minerals = self.workers.filter(
                     lambda unit: not unit.is_carrying_resource and unit.order_target in self.mineral_field.tags and unit.distance_to_squared(base) < 100
                 )
@@ -133,29 +141,33 @@ class TheUnseenz(sc2.BotAI):
                         worker = workers_on_minerals[min(n, workers_on_minerals.amount) - 1]
                         excess_workers.append(worker)
                         
-        # Oversaturated workers should be on minerals only
-        for gas in self.gas_buildings.ready:
-            if gas.surplus_harvesters > 0:
-                workers_in_gas = self.workers.filter(
-                    lambda unit: not unit.is_carrying_resource and unit.order_target == gas.tag
-                )
-                if workers_in_gas:
-                    for n in range(gas.surplus_harvesters):
-                        # prevent crash by only taking the minimum
-                        worker = workers_in_gas[min(n, workers_in_gas.amount) - 1]
-                        closest_mineral_patch = self.mineral_field.closest_to(worker)
-                        self.do(worker.gather(closest_mineral_patch))
+#        # Oversaturated workers should be on minerals only
+#        for gas in self.gas_buildings.ready:
+#            if gas.surplus_harvesters > 0:
+#                workers_in_gas = self.workers.filter(
+#                    lambda unit: not unit.is_carrying_resource and unit.order_target == gas.tag
+#                )
+#                if workers_in_gas:
+#                    for n in range(gas.surplus_harvesters):
+#                        # prevent crash by only taking the minimum
+#                        worker = workers_in_gas[min(n, workers_in_gas.amount) - 1]
+#                        closest_mineral_patch = self.mineral_field.closest_to(worker)
+#                        self.do(worker.gather(closest_mineral_patch))
                         
         
         # Send oversaturated workers to fresh mineral fields
         for base in self.townhalls.ready:
             # Negative surplus harvesters indicates not enough workers
             if base.surplus_harvesters < 0:
+                fresh_mineral_patch = self.mineral_field.closest_to(base)
                 if excess_workers:
                     for n in range(-base.surplus_harvesters):
-                        worker = excess_workers[min(n, excess_workers.amount) - 1]
-                        fresh_mineral_patch = self.mineral_field.closest_to(base)
+                        worker = excess_workers[min(n, excess_workers.amount) - 1]                        
                         self.do(worker.gather(fresh_mineral_patch))
+                # Rally all saturated bases to this base. If there are multiple unsaturated bases, this will rally them to the last created townhall.
+                for other_bases in set_rally:
+                    self.do(other_bases.smart(fresh_mineral_patch))
+                self.do(base.smart(fresh_mineral_patch)) # Don't forget: unsaturated bases should fill themselves before others!
             
         # Check mineral-gas balance
         if mineral_income/max(vespene_income,1) > resource_ratio:
@@ -205,10 +217,10 @@ class TheUnseenz(sc2.BotAI):
                                 self.do(worker.gather(fresh_mineral_patch))
         
         
-        # Idle workers should mine minerals, even if its oversaturated.
-        for worker in self.workers.idle:
-            closest_mineral_patch = self.mineral_field.closest_to(self.townhalls.closest_to(worker))
-            self.do(worker.gather(closest_mineral_patch))
+#        # Idle workers should mine minerals, even if its oversaturated.
+#        for worker in self.workers.idle:
+#            closest_mineral_patch = self.mineral_field.closest_to(self.townhalls.closest_to(worker))
+#            self.do(worker.gather(closest_mineral_patch))
             
 
     def calculate_effective_dps(self, own_army, enemy_army):    
@@ -265,7 +277,7 @@ class TheUnseenz(sc2.BotAI):
                     
             
                 # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius -> 0.8*
-                time_to_kill_air = time_to_kill_air/(max(0.8*(own_army.splash_area_air/(self.PI*(enemy_army.size/2)**2)), 1))
+                time_to_kill_air = time_to_kill_air/(max(0.8*(own_army.splash_area_air/(math.pi*(enemy_army.size/2)**2)), 1))
                 
         if enemy_army.is_ground: # Anti-ground weapons         
             if own_army.bonus_attr_ground in enemy_army.attribute:
@@ -305,7 +317,7 @@ class TheUnseenz(sc2.BotAI):
                     
                 
                 # Add in splash damage modifier = Square root of no. of units that can fit into the splash radius -> 0.8*
-                time_to_kill_ground = time_to_kill_ground/(max(0.8*(own_army.splash_area_ground/(self.PI*(enemy_army.size/2)**2)), 1))
+                time_to_kill_ground = time_to_kill_ground/(max(0.8*(own_army.splash_area_ground/(math.pi*(enemy_army.size/2)**2)), 1))
                 
         # Add in cost difference modifier. Vespene gas is counted as equally valuable as minerals. It may be worth more.
         time_to_kill_air = time_to_kill_air*((own_army.minerals + self.gas_value*own_army.vespene)/(enemy_army.minerals + self.gas_value*enemy_army.vespene))
@@ -361,7 +373,7 @@ class TheUnseenz(sc2.BotAI):
                 
                 # Note: Units we don't own will be registered as the initialized time to kill and dps dealt, which is currently both 0
                 if (own_units(own_army) or future_own_units[i]) and (enemy_units(enemy_army) or future_enemy_units[j]):
-                    optimal_units_attacking = math.floor((self.PI/2)*(max(own_army.range_ground, own_army.range_air) + 2)/own_army.size)
+                    optimal_units_attacking = math.floor((math.pi/2)*(max(own_army.range_ground, own_army.range_air) + 2)/own_army.size)
                     if (own_units(own_army).amount + future_own_units[i]) <= optimal_units_attacking or not own_army.is_ground:
                         own_time_to_kill[i][j] = self.own_time_to_kill[i][j].copy()\
                         *((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene)\
@@ -374,10 +386,18 @@ class TheUnseenz(sc2.BotAI):
                     # Effective dps = Time it takes for each unit to reach and kill all units of another type. Weigh this for all units by their total value.
                     effective_dps_dealt[i][j] = (1/(self.own_time_to_reach[i][j].copy() + own_time_to_kill[i][j].copy()))\
                         *((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene))
-                
+#                    print("DEBUGGER")
+#                    print(own_army)
+#                    print(enemy_army)
+#                    print(self.own_time_to_reach[i][j].copy())
+#                    print(own_time_to_kill[i][j].copy())
+#                    print("unit value")
+#                    print((enemy_units(enemy_army).amount + future_enemy_units[j])*(enemy_army.minerals + self.gas_value*enemy_army.vespene))
+#                    print((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene))
+                    
                 # Calculations for enemy are symmetrical.
 #                if enemy_units(enemy_army) or future_enemy_units[j]:
-                    optimal_units_attacking = math.floor((self.PI/2)*(max(enemy_army.range_ground, enemy_army.range_air) + 2)/enemy_army.size)
+                    optimal_units_attacking = math.floor((math.pi/2)*(max(enemy_army.range_ground, enemy_army.range_air) + 2)/enemy_army.size)
                     if (enemy_units(enemy_army).amount + future_enemy_units[j]) <= optimal_units_attacking or not enemy_army.is_ground:
                         enemy_time_to_kill[i][j] = self.enemy_time_to_kill[i][j].copy()\
                         *((own_units(own_army).amount + future_own_units[i])*(own_army.minerals + self.gas_value*own_army.vespene)\
@@ -395,7 +415,10 @@ class TheUnseenz(sc2.BotAI):
             i += 1        
         
         # TODO: Effective dps only lasts as long as the unit is alive. This is reflected in our combat score, but does not reflect how effective hp is calculated assuming full effective dps!
-        
+        # Enemies with 0 damage to us are not a threat, we don't need to deal with them! We need to fix this to avoid making phoenix as an air tank against no air units!
+        # Effective hp = 1/time to die
+        # Time to die = num_units*time_to_kill + time_to_reach
+        # num_units reduces over time based on our num_units*time_to_kill + time_to_reach
         no_threat = 0.01
         own_effective_dps = np.sum(effective_dps_dealt.copy(),axis=1)
         own_effective_hp = 1/np.sum(np.clip(effective_dps_taken.copy(),a_min=no_threat, a_max=None),axis=1)
@@ -427,7 +450,7 @@ class TheUnseenz(sc2.BotAI):
         own_combat_score = np.sum(own_effective_dps*own_effective_hp)
         enemy_combat_score = np.sum(enemy_effective_dps*enemy_effective_hp)
         # Threat level = our combat score/enemy combat score
-        threat_level = enemy_combat_score/own_combat_score        
+        threat_level = enemy_combat_score/max(own_combat_score,0.0001)
         
         return threat_level
                     
@@ -494,14 +517,19 @@ class TheUnseenz(sc2.BotAI):
                 
             if not scout.order_target == scouting_unit.next_location:        
                 self.do(scout.move(scouting_unit.next_location))
-    
+        
     # Removes destroyed units from known_enemy_units and known_enemy_structures. Seems to work. Will not register units dying in fog as dead, how do we deal with this?
     async def on_unit_destroyed(self, unit_tag):
-        self.known_enemy_units = self.known_enemy_units.filter(lambda unit: unit.tag != unit_tag)
-        self.known_enemy_structures = self.known_enemy_structures.filter(lambda unit: unit.tag != unit_tag)
+        units = self.known_enemy_units.filter(lambda unit: unit.tag == unit_tag)
+        for unit in units:
+#            self.known_enemy_units = self.known_enemy_units.filter(lambda unit: unit.tag != unit_tag)
+            self.known_enemy_units.remove(unit)
+            self.enemy_army_value[0] -= self.calculate_unit_value(unit.type_id).minerals
+            self.enemy_army_value[1] -= self.calculate_unit_value(unit.type_id).vespene
+#        self.known_enemy_structures = self.known_enemy_structures.filter(lambda unit: unit.tag != unit_tag)
 #        print(len(self.known_enemy_units))    
 #        print(len(self.known_enemy_structures))
-
+        
     async def on_enemy_unit_entered_vision(self, unit):
         unit.last_update = self.time
         
@@ -526,21 +554,23 @@ class TheUnseenz(sc2.BotAI):
     async def on_building_construction_started(self, unit):
         if unit in self.structures({CYBERNETICSCORE,FLEETBEACON,ROBOTICSBAY,TEMPLARARCHIVE,DARKSHRINE}):
             await self.better_distribute_workers(self.resource_ratio)
-
-            
+        
     async def on_step(self, iteration):
         if iteration == 0:
-            # Initialize
             await self.chat_send("(glhf)(protoss)")
+            # Initialize            
             self.known_enemy_units = self.enemy_units
             self.known_enemy_structures = self.enemy_structures
+            self.known_minerals = self.mineral_field.closer_than(10,list(self.owned_expansions.keys())[0])
+            self.known_gas = self.vespene_geyser.closer_than(10,list(self.owned_expansions.keys())[0])
             self.future_enemy_units = self.enemy_units
+            self.enemy_expansions = [self.enemy_start_locations[0]]            
+            for base in self.enemy_expansions:
+                base.last_update = 0
             # Import unit list
-            unit_list(self)
-            
+            unit_list(self)            
         
             # Check our race
-            # For some reason if we only do this on game start, the bot will forget the races.
             if (self.race == Race.Terran):
                 self.own_army_race = self.terran_army
             if (self.race == Race.Protoss):
@@ -562,6 +592,9 @@ class TheUnseenz(sc2.BotAI):
             self.enemy_time_to_kill = np.zeros((len(self.own_army_race),len(self.enemy_army_race)))
             self.enemy_time_to_reach = np.zeros((len(self.own_army_race),len(self.enemy_army_race)))
             self.unit_score = np.zeros(len(self.own_army_race))
+            
+#            self.effective_dps_dealt = np.zeros((len(self.own_army_race),len(self.enemy_army_race)))
+#            self.effective_dps_taken = np.zeros((len(self.own_army_race),len(self.enemy_army_race)))
             i = 0
             for own_army in self.own_army_race:
                 j = 0
@@ -594,18 +627,31 @@ class TheUnseenz(sc2.BotAI):
 #            print(np.sum(self.effective_dps_dealt,axis=1))
 #            print(np.sum(self.effective_dps_taken,axis=1))
 #            print((np.sum(self.effective_dps_taken,axis=1))/(np.sum(self.effective_dps_dealt,axis=1)))
-                
-        # Find closest expansions to enemy base. Includes enemy main base. self.owned_expansions includes our main base, but we take it out here.
-        # Sorting the expansion keys conveniently converts it into a list for us (it otherwise is a dict_keys object)
-        # Sort it on distance to enemy for finding the enemy and distance to us for finding proxies, it isn't always just in reverse order.
-        # TODO: Keep track of which bases are taken by enemy so we don't keep running scouts into them.
-        self.ordered_expansions = list(set(sorted(self.expansion_locations.keys())) - set(sorted(self.owned_expansions.keys())))
+        
+        
+        # Lists out the expansions on the map. Ordered expansions shows expansions that have not yet been taken (or are taken by enemy but we don't know yet)
+        # Enemy expansions are all expansions we know the enemy has.
+        self.ordered_expansions = list(self.expansion_locations.keys() - self.owned_expansions.keys() - set(self.enemy_expansions))
         self.ordered_expansions = sorted(
             self.ordered_expansions, key=lambda expansion: expansion.distance_to(self.start_location) 
         )
+
+        for base in self.ordered_expansions:
+            townhalls = {NEXUS, COMMANDCENTER, ORBITALCOMMAND, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
+            if self.enemy_structures(townhalls).closer_than(5, base):
+                if base not in self.enemy_expansions:
+                    self.enemy_expansions.append(base)
+                    # ETA = estimated completion time of base
+                    eta = (1 - self.enemy_structures(townhalls).closest_to(base).build_progress)*71
+                    base.last_update = self.time + eta
+            else:
+                if base in self.enemy_expansions and self.is_visible(base):
+                    self.enemy_expansions.remove(base)
+
         self.ordered_expansions_enemy = sorted(
-            self.ordered_expansions, key=lambda expansion: expansion.distance_to(self.enemy_start_locations[0]) 
+            self.enemy_expansions, key=lambda expansion: expansion.distance_to(self.enemy_start_locations[0]) 
         )
+        
         
         # State management        
         # Mineral and vespene rates are per minute, supply rates are per second
@@ -618,7 +664,7 @@ class TheUnseenz(sc2.BotAI):
         num_production = num_warpgates + num_stargates + num_robos
         
         # Once we are nearing worker cap, remove them from the resource consumption rate.
-        if self.supply_workers >= self.MAX_WORKERS - 10: 
+        if self.supply_workers >= self.MAX_WORKERS - 10 or self.threat_level > 1.2:
             supply_rate = num_warpgates*self.WARPGATE_SUPPLY_RATE + num_stargates*self.STARGATE_SUPPLY_RATE + num_robos*self.ROBO_SUPPLY_RATE            
             mineral_rate = (num_warpgates*self.WARPGATE_MINERAL_RATE + num_stargates*self.STARGATE_MINERAL_RATE + num_robos*self.ROBO_MINERAL_RATE + supply_rate*100/8)*60            
         else:    
@@ -627,10 +673,10 @@ class TheUnseenz(sc2.BotAI):
             mineral_rate = (num_warpgates*self.WARPGATE_MINERAL_RATE + num_stargates*self.STARGATE_MINERAL_RATE + num_robos*self.ROBO_MINERAL_RATE \
             + len(self.structures(NEXUS).ready)*self.NEXUS_MINERAL_RATE + supply_rate*100/8)*60
         vespene_rate = (num_warpgates*self.WARPGATE_VESPENE_RATE + num_stargates*self.STARGATE_VESPENE_RATE + num_robos*self.ROBO_VESPENE_RATE)*60
-        
+        ideal_gas_buildings = math.floor(vespene_rate/160) + 1
         save_resources = 0
         
-	# Count enemy expenditure. As we aren't given any information on enemy upgrades, the cost of upgrades will be ignored.
+        # Count enemy expenditure. As we aren't given any information on enemy upgrades, the cost of upgrades will be ignored.
         for unit in self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units and not unit.is_snapshot):
             # First 12 workers and zerg's first overlord are free.
             unit.last_update = self.time
@@ -638,17 +684,31 @@ class TheUnseenz(sc2.BotAI):
                     (unit in self.enemy_units(OVERLORD) and self.known_enemy_units(OVERLORD).amount < 1)):
                 self.enemy_minerals_spent += self.calculate_unit_value(unit.type_id).minerals
                 self.enemy_vespene_spent += self.calculate_unit_value(unit.type_id).vespene
+            if unit not in self.enemy_units({SCV, PROBE, DRONE, OVERLORD}):
+                self.enemy_army_value[0] += self.calculate_unit_value(unit.type_id).minerals
+                self.enemy_army_value[1] += self.calculate_unit_value(unit.type_id).vespene
         for structure in self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures and not unit.is_snapshot):
             # First townhall is free
             structure.last_update = self.time
             if not (structure in self.enemy_structures({NEXUS, COMMANDCENTER, HATCHERY}) and self.enemy_structures({NEXUS, COMMANDCENTER, HATCHERY}).amount <= 1):
                 self.enemy_minerals_spent += self.calculate_unit_value(structure.type_id).minerals
                 self.enemy_vespene_spent += self.calculate_unit_value(structure.type_id).vespene
-        # Track known enemy units and structures. Updated whenever we see new units and removed whenever they die in vision.
-        self.known_enemy_units += self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units)
-        self.known_enemy_structures += self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures)
+        # Track known enemy units and structures. Updated whenever we see new units and removed whenever they die in vision. 
+        # TODO: Should snapshots be included? On one hand, we get too many snapshots. On the other hand, how else will we detect siege tanks on the highground?
+        self.known_enemy_units += self.enemy_units.filter(lambda unit: unit not in self.known_enemy_units and not unit.is_snapshot)
+        # Known enemy structures will get clogged up with snapshots which have different unit tags, just remove the snapshots as we don't need them (since we already save the original)
+        # Turns out self.enemy_structures already contains snapshots of buildings if we don't have vision of them...
+        for mineral in self.mineral_field.filter(lambda mineral: mineral not in self.known_minerals and not mineral.is_snapshot):
+            mineral.last_update = self.time
+        self.known_minerals += self.mineral_field.filter(lambda mineral: mineral not in self.known_minerals and not mineral.is_snapshot)
+        self.known_gas += self.vespene_geyser.filter(lambda gas: gas not in self.known_gas and not gas.is_snapshot)
+        self.known_enemy_structures += self.enemy_structures.filter(lambda unit: unit not in self.known_enemy_structures and not unit.is_snapshot)
+#        self.known_enemy_structures = self.known_enemy_structures.filter(lambda unit: not unit.is_snapshot)
+#        for unit in self.known_enemy_units: # Should not be necessary since it's already in on_unit_entered_vision?
+#            if self.is_visible(unit.position):
+#                unit.last_update = self.time
         
-	# Track enemy resources
+        # Track enemy resources
         # Will not include the cost of the drone for zerg buildings (we might not see the worker that was used)
         # Will only recognize lost mining time after seeing the mineral fields (especially relevant vs terran)
         # Will not model mule mining rate, but upon seeing more minerals being mined from the mineral patch, will retroactively add that in.
@@ -837,32 +897,62 @@ class TheUnseenz(sc2.BotAI):
                     i += 1                    
         self.enemy_minerals = self.enemy_minerals_mined - self.enemy_minerals_spent
         self.enemy_vespene = self.enemy_vespene_mined - self.enemy_vespene_spent
-	
-        # Track our units
-        self.all_army = self.units.not_structure - self.units(PROBE) - self.units(INTERCEPTOR)    
-        pending_units = np.zeros(len(self.own_army_race))
-        for own_army in self.own_army_race:
-            pending_units[own_army.id] = self.already_pending(own_army)
-        future_own_units = pending_units
-	
+                    
         # Determine if we need detection for enemy cloaked/burrowed units
         # DECIDE: What about burrow roaches? Baneling bombs? Should we preemptively build detection for tech lab starports? What about for clearing creep?
-        if self.known_enemy_structures.of_type(STARPORT):
-            for starport in self.known_enemy_structures.of_type(STARPORT):
+        if self.enemy_structures.of_type(STARPORT):
+            for starport in self.enemy_structures.of_type(STARPORT):
                 if starport.has_techlab:
                     self.need_detection = True
                     return
         if self.known_enemy_units.of_type({WIDOWMINE, GHOST, BANSHEE, DARKTEMPLAR, MOTHERSHIP, LURKERMP, INFESTOR}) \
-        or self.known_enemy_structures.of_type({GHOSTACADEMY, DARKSHRINE, LURKERDEN}):
+        or self.enemy_structures.of_type({GHOSTACADEMY, DARKSHRINE, LURKERDEN}):
             self.need_detection = True
         if self.units(OBSERVER):
             self.have_detection = True
         else:
             self.have_detection = False           
         
-        # Calculate which unit is most effective vs the enemy current and future units
+        # Track our units
+        self.all_army = self.units - self.units(PROBE) - self.units(INTERCEPTOR) - self.units(HIGHTEMPLAR)# Don't touch HTs until they morph archons/I make logic for spellcasting!        
+        # Assumes we actually have the resources to afford these units
+        defender_advantage = 60 # Amount of extra production time's worth of units we make while enemy is on the way to our base
+        pending_units = np.zeros(len(self.own_army_race))
+        pending_units[self.best_stargate_unit.id] = num_stargates*defender_advantage/self.best_stargate_unit.build_time
+        pending_units[self.best_robo_unit.id] = num_robos*defender_advantage/self.best_robo_unit.build_time
+        pending_units[self.best_warpgate_unit.id] = num_warpgates*defender_advantage/self.best_warpgate_unit.build_time
+        future_own_units = pending_units
         
-        # Micro            
+        
+        # Calculate which unit is most effective vs the enemy current and future units
+        # Only recalculate threat level if either army has changed to avoid unnecessary calculations.
+        if not self.last_army_supply == self.supply_army or not self.last_known_enemy_amount == len(self.known_enemy_units):
+            # TODO: Implement self.future_enemy_units. Calculates how many and of what type of units we may face in the future. 
+            # How many: Each time we see their bases, count their workers and bases. We can assume that they will fill up inner bases before outer bases.
+            # Assume that they constantly produce workers up to the number of bases we last saw, and mine 6 gas for every 16 minerals in that ratio, regardless of worker count.
+            # Integrate their worker production via composite trapezoidal rule to calculate the total money they should have
+            # Deduct each extra tech building we see from the total money they should have
+            # Possible future units are less important to deal with than current units, especially when considering we may not guess right.
+            
+            future_unit_value = max(0.5*(self.enemy_minerals + self.gas_value*self.enemy_vespene),100) # Why are we sometimes getting negative resources?
+            
+            # TODO: Enemies are capped both by resources and by production. We will most likely not see all their production, and these extra production buildings will cost money too!
+            # Also: mineral-gas ratios should be considered, but how?
+            
+            # What type: Based on the tech and production we see, calculate possible tech switches and amount of units in the future. More likely to see units we already see and new tech that was added.
+            total_unit_value = self.enemy_army_value[0] + self.gas_value*self.enemy_army_value[1]
+            current_future_unit_ratio = 0.8 # Ratio of assuming enemy will make more of what they currently have vs tech switching. Higher ratio = harder counters, lower ratio = more generalist approach
+            future_enemy_units = np.zeros(len(self.enemy_army_race))
+            for enemy_army in self.enemy_army_race:
+                # Current_future_unit_ratio = % of army of that unit type
+                # Unit_ratio = 
+                unit_ratio = (self.known_enemy_units(enemy_army).amount*enemy_army.minerals + self.gas_value*self.known_enemy_units(enemy_army).amount*enemy_army.vespene)/max(total_unit_value,50)
+                unit_ratio = unit_ratio*current_future_unit_ratio + (1-current_future_unit_ratio)/len(self.enemy_army_race)
+                future_enemy_units[enemy_army.id] += unit_ratio*future_unit_value/(enemy_army.minerals + self.gas_value*enemy_army.vespene)
+                
+            self.threat_level = self.calculate_threat_level(self.own_army_race, self.all_army, self.enemy_army_race, self.known_enemy_units, future_own_units, future_enemy_units)
+        
+        # Micro  
         # Self.all_army = F2 
         # If we are close to max supply, attack closes enemy unit/building, or if none is visible: attack move towards enemy spawn
         # TODO: Stay away from enemies if it's a fight we cannot win
@@ -873,68 +963,89 @@ class TheUnseenz(sc2.BotAI):
         # TODO: Use army abilities
         # TODO: How to deal with high ground vision and choke points?
         # Don't repeat the same command on every frame, it's unnecessary apm and causes lag!
-        
-        # Only recalculate threat level if either army has changed to avoid unnecessary calculations.
-        if not self.last_army_supply == self.supply_army or not self.last_known_enemy_amount == len(self.known_enemy_units):
-            # TODO: Implement self.future_enemy_units. Calculates how many and of what type of units we may face in the future. 
-            # How many: Each time we see their bases, count their workers and bases. We can assume that they will fill up inner bases before outer bases.
-            # Assume that they constantly produce workers up to the number of bases we last saw, and mine 6 gas for every 16 minerals in that ratio, regardless of worker count.
-            # Integrate their worker production via composite trapezoidal rule to calculate the total money they should have
-            # Deduct each extra tech building we see from the total money they should have
-            # What type: Based on the tech and production we see, calculate possible tech switches and amount of units in the future. More likely to see units we already see and new tech that was added.
-            future_unit_value = (mineral_income + vespene_income)/2       
-            future_enemy_units = np.zeros(len(self.enemy_army_race))
-            for enemy_army in self.enemy_army_race:
-                future_enemy_units[enemy_army.id] +=  future_unit_value/(enemy_army.minerals + self.gas_value*enemy_army.vespene)
-                
-            self.threat_level = self.calculate_threat_level(self.own_army_race, self.all_army, self.enemy_army_race, self.known_enemy_units, future_own_units, future_enemy_units) 
-        
         # Choose target and attack, filter out invisible targets
-        targets = (self.enemy_units | self.enemy_structures).filter(lambda unit: unit.can_be_attacked and not self.units({LARVA, EGG, INTERCEPTOR}))
+        targets = (self.enemy_units | self.enemy_structures).filter(lambda unit: unit.can_be_attacked and not unit.is_snapshot and not self.units({LARVA, EGG, INTERCEPTOR}))
         defenceless_targets = self.enemy_units.of_type({SCV, PROBE, DRONE, OVERLORD, OVERSEER})\
         | self.enemy_structures.exclude_type({MISSILETURRET, PLANETARYFORTRESS, PHOTONCANNON, SPINECRAWLER, SPORECRAWLER})
         if self.all_army:
             army_center = self.all_army.center
-	
-	# Worker scout on gateway start
+            
+            
+        # Worker scout on gateway start
         if self.structures(GATEWAY) and not self.worker_scout:
             self.worker_scout = self.units(PROBE).closest_to(self.enemy_start_locations[0])
             
         elif self.worker_scout:
             self.send_scout(self.worker_scout)
-        for army in self.all_army:            
-            if army not in self.units(HIGHTEMPLAR): # Don't touch HTs until they morph archons/I make logic for spellcasting!
-                if targets:
-                    # If the enemy is not a threat, group up all army to attack together.
-                    if True: #min(self.threat_level) < 1:
-                        target = targets.closest_to(army)
-                        # Unit has no attack, stay near other army units                    
-                        if army.weapon_cooldown == -1 and not army.is_moving: 
-                            self.do(army.move(self.all_army.closest_to(army)))                
-                        # Unit has just attacked, stutter step while waiting for attack cooldown
-                        elif army.weapon_cooldown > self.kite_distance/army.movement_speed and army.target_in_range(target, bonus_distance = self.kite_distance):
-                            kite_pos = army.position.towards(target.position, -8)
-                            self.do(army.move(kite_pos))
-#                            if army in self.units(VOIDRAY):
+            
+        
+        for army in self.all_army:
+            if targets:
+                # If the enemy is not a threat, group up all army to attack together.
+                if True: #min(threat_level) < 1:
+                    target = targets.closest_to(army)
+#                    if army in self.units(VOIDRAY) and target.is_armored and army.target_in_range(target):
+#                        army(EFFECT_VOIDRAYPRISMATICALIGNMENT)
+                    # Unit has no attack, stay near other army units                    
+                    if army.weapon_cooldown == -1 and not army.is_moving: 
+                        self.do(army.move(self.all_army.closest_to(army)))                
+                    # Unit has just attacked, stutter step while waiting for attack cooldown
+                    elif army.weapon_cooldown > self.kite_distance/army.movement_speed and army.target_in_range(target, bonus_distance = self.kite_distance):
+                        kite_pos = army.position.towards(target.position, -1)
+#                        self.do(army(STOP_DANCE))
+                        self.do(army.move(kite_pos))
+                        
+                    # Regroup
+                    elif army.distance_to_squared(army_center) > 225 and not army.target_in_range(target) and targets.exclude_type(defenceless_targets) and not army.is_moving:
+                        self.do(army.move(army_center))
+                    # Unit is ready to attack, go attack. Use smart command (right click) instead of attack because carriers/bcs don't work with attack
+                    else:
+                        if not army.is_attacking:
+                            self.do(army.attack(target))
+                # If the enemy is currently too strong, avoid the enemy army and poke.
+#                if threat_level >= 1:
+                    
+                # If the enemy is attacking us and we are too weak by a little bit, fight with static defense and/or pull workers.
+                
+                # If the enemy is attacking us and we are too weak by far, rat.
+                
+                
+            # If we don't see any enemies, scout the map
+            elif army in self.all_army.idle:# and self.supply_used > 180:
+                self.do(army.move(self.scout_map(priority = 'Map')))
+                        
+                    
+#                        # Seems like there was an update which I didn't get yet, so I can't use this yet?
+#                        # Unit has no attack, stay near other army units                    
+#                        if not army.can_attack and not army.is_moving: 
+#                            self.do(army.move(self.all_army.closest_to(army)))
+#                        # Attack: If unit has attack ready and enemy is in range/are near enough for us to hit without overextending 
+#                        elif army.weapon_ready and \
+#                        (army.target_in_range(target) or (army.target_in_range(target, bonus_distance = self.kite_distance) and target.speed < army.speed)):
+#                            self.do(army.attack(target))
+#                            if army in self.units(VOIDRAY) and target.is_armored:
 #                                self.do(army(EFFECT_VOIDRAYPRISMATICALIGNMENT))
-                        # Regroup
-                        elif army.distance_to_squared(army_center) > 225 and not army.target_in_range(target) and targets not in defenceless_targets and not army.is_moving:
-                            self.do(army.move(army_center))
-                        # Unit is ready to attack, go attack. Use smart command (right click) instead of attack because carriers/bcs don't work with attack
-                        else:
-    #                        if not army.is_attacking: # Units that can attack while moving don't work well with this!
-                            self.do(army.smart(target))
+#                        # Unit has just attacked, stutter step while waiting for attack cooldown
+#                        elif army.target_in_range(target, bonus_distance = army.distance_to_weapon_ready):
+#                            kite_pos = army.position.towards(target.position, -8)
+#                            self.do(army.move(kite_pos))
+#                        # Attack: Agressor
+#                        elif not (targets not in defenceless_targets) or army.distance_to_squared(army_center) < 225:
+#                            self.do(army.attack(target))
+#                            if army in self.units(VOIDRAY) and target.is_armored:
+#                                self.do(army(EFFECT_VOIDRAYPRISMATICALIGNMENT))
+#                        # Regroup
+#                        else:
+#                            if not army.is_moving:
+#                                self.do(army.move(army_center))
+                            
                     # If the enemy is currently too strong, avoid the enemy army and poke.
     #                if self.threat_level >= 1:
                         
                     # If the enemy is attacking us and we are too weak by a little bit, fight with static defense and/or pull workers.
                     
                     # If the enemy is attacking us and we are too weak by far, rat.
-                    
-                    
-                # If we don't see any enemies, scout the map
-                elif army in self.all_army.idle:# and self.supply_used > 180:     
-                    self.do(army.move(self.scout_map(priority = 'Map')))
+
         
                     
         # Morph archons            
@@ -976,7 +1087,7 @@ class TheUnseenz(sc2.BotAI):
                 if EFFECT_CHRONOBOOSTENERGYCOST in abilities_nexus:
                     self.do(loop_nexus(EFFECT_CHRONOBOOSTENERGYCOST, nexus))
                     break
-			
+                
         # Distribute workers in gas and across bases. Takes into account our mineral-gas expenditure ratio.
         # We don't need to check for oversaturation so often.
         if iteration%(self.ITERATIONS_PER_MINUTE/4) == 0:
@@ -990,11 +1101,12 @@ class TheUnseenz(sc2.BotAI):
         for worker in self.workers.idle:
             closest_mineral_patch = self.mineral_field.closest_to(self.townhalls.closest_to(worker))
             self.do(worker.gather(closest_mineral_patch))
-            
         
 
         # Choose building placement
-        # Pylon positions = Walling placement, then next to unpowered buildings, then next to nexus without pylons, then next to other buildings. Avoid mineral line. TODO: Spotter pylons
+        # Pylon positions = Walling placement, then next to unpowered buildings, then next to nexus without pylons, then next to other buildings. 
+        # TODO: Avoid mineral line and walling our stuff in (still happens sometimes)
+        # TODO: Spotter pylons
         if await self.can_place(PYLON, self.main_base_ramp.protoss_wall_pylon):
             pylon_placement = self.main_base_ramp.protoss_wall_pylon
         else:
@@ -1035,22 +1147,20 @@ class TheUnseenz(sc2.BotAI):
             if self.can_afford(PROBE):
                 self.do(nexus.train(PROBE), subtract_cost=True, subtract_supply=True)
 
-        # If we are about to reach saturation on existing town halls, expand        
+        # If we are about to reach saturation on existing town halls, expand, but only if we are not in danger.  
         # TODO: Send worker to expansion location just in time for having money for town hall
         if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.NEXUS_BUILD_TIME >= \
-        (self.townhalls.ready.amount + self.already_pending(NEXUS))*16 + max(ideal_gas_buildings, self.townhalls.amount*2)*3:
+        (self.townhalls.ready.amount + self.already_pending(NEXUS))*16 + min(ideal_gas_buildings, self.townhalls.amount*2)*3 and self.threat_level < 2:
             if self.can_afford(NEXUS):
                 await self.expand_now()
             # If we need an expansion but don't have resources, save for it unless we are in danger
-            elif self.threat_level < 1.1:
+            elif self.threat_level < 2:
                 save_resources = 1
         # If we have reached max workers and have a lot more minerals than gas, expand for more gas.
         elif self.supply_workers > self.MAX_WORKERS-10 and self.minerals > 1000 and ideal_gas_buildings > self.townhalls.amount*2 and self.already_pending(NEXUS) == 0:
             await self.expand_now()
             
-        # Build gas near completed nexuses once we have a cybercore (does not need to be completed)
-        # TODO: Have weightage on earlier gas for tech rush
-        
+        # Build gas near completed nexuses, dynamically adjusted for how much gas we need for the units we want to make.        
         if (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR)) < ideal_gas_buildings and num_production:
             for nexus in self.townhalls.ready:
                 vgs = self.vespene_geyser.closer_than(10, nexus)                
@@ -1066,12 +1176,25 @@ class TheUnseenz(sc2.BotAI):
 
                 
         # Calculate best unit to make. Only recalculate if either army has changed to avoid unnecessary calculations.
-        if not self.last_army_supply == self.supply_army or not self.last_known_enemy_amount == len(self.known_enemy_units):
-            future_unit_value = (mineral_rate + vespene_rate)
+        if not self.last_army_supply == self.supply_army or not self.last_known_enemy_amount == len(self.known_enemy_units):            
             self.unit_score = np.zeros(len(self.own_army_race))
             i = 0
             for own_army in self.own_army_race:
-                future_own_units = pending_units.copy()        
+                # Future unit value: Resources mined in 1 minute
+                future_unit_value = (mineral_rate + self.gas_value*vespene_rate)
+                future_own_units = pending_units.copy()
+                # Teching up costs money!
+                if own_army in [TEMPEST, CARRIER, MOTHERSHIP] and not self.structures(FLEETBEACON):
+                    future_unit_value -= (self.calculate_unit_value(FLEETBEACON).minerals + self.gas_value*self.calculate_unit_value(FLEETBEACON).vespene)
+                if own_army in [COLOSSUS, DISRUPTOR] and not self.structures(ROBOTICSBAY):
+                    future_unit_value -= (self.calculate_unit_value(ROBOTICSBAY).minerals + self.gas_value*self.calculate_unit_value(ROBOTICSBAY).vespene)
+                if own_army in [ARCHON] and not self.structures(TEMPLARARCHIVE):
+                    future_unit_value -= (self.calculate_unit_value(TEMPLARARCHIVE).minerals + self.gas_value*self.calculate_unit_value(TEMPLARARCHIVE).vespene)
+                if own_army in [DARKTEMPLAR] and not self.structures(DARKSHRINE):
+                    future_unit_value -= (self.calculate_unit_value(DARKSHRINE).minerals + self.gas_value*self.calculate_unit_value(DARKSHRINE).vespene)
+                # If teching up is somehow more expensive than we have money, don't even bother calculating.
+                if future_unit_value < 0:
+                    continue
                 future_own_units[i] += future_unit_value/(own_army.minerals + self.gas_value*own_army.vespene)
                 self.unit_score[own_army.id] = self.calculate_threat_level(self.own_army_race, self.all_army, self.enemy_army_race, self.known_enemy_units, future_own_units, future_enemy_units)
                 i += 1
@@ -1081,12 +1204,11 @@ class TheUnseenz(sc2.BotAI):
         # TODO: Consider how much army we currently have to determine if it is safe to tech up.
         # TODO: Include every upgrade in the game, and consider how many of the unit we plan to use in the future (i.e. start charge before we have zealots if we want them soon)
         warpgate_tech = [ARCHON.id] # Disabled dark templars until I figure out a fix for threat level!
-        stargate_tech = [TEMPEST.id, CARRIER.id]
-        robo_tech = [COLOSSUS.id, DISRUPTOR.id]
+        stargate_tech = [TEMPEST.id] # Carriers bugged, take them out!
+        robo_tech = [COLOSSUS.id]
         self.best_unit = np.argmin(self.unit_score)
         
         if self.structures(PYLON).ready:
-            pylon = self.structures(PYLON).ready.random
             # If we have a gateway completed, build cyber core
             if self.structures(GATEWAY).ready or self.structures(WARPGATE):
                 if not self.structures(CYBERNETICSCORE):
@@ -1106,76 +1228,78 @@ class TheUnseenz(sc2.BotAI):
             elif self.can_afford(GATEWAY) and self.structures(GATEWAY).amount == 0:
                 await self.build(GATEWAY, near=building_placement)
             
-            # Tech: Upgrade warpgate units                        
-            if self.best_unit in warpgate_tech:
-                if self.structures(CYBERNETICSCORE).ready:
-                    if not self.structures(TWILIGHTCOUNCIL):
-                        if self.can_afford(TWILIGHTCOUNCIL) and self.already_pending(TWILIGHTCOUNCIL) == 0:
-                            await self.build(TWILIGHTCOUNCIL, near=tech_placement)
-                            
-                    else:
-                        if self.structures(TWILIGHTCOUNCIL).ready:
-                            twilight = self.structures(TWILIGHTCOUNCIL).ready.first
-                            # If we have lots of zealot/stalker/adept, research charge/blink/glaives
-                            if self.units(ZEALOT).amount > 5:
-                                if self.can_afford(RESEARCH_CHARGE) and self.already_pending_upgrade(CHARGE) == 0:
-                                    self.do(twilight.research(CHARGE))
-                                elif not self.can_afford(RESEARCH_CHARGE):
-                                    save_resources = 1
-                            if self.units(STALKER).amount > 5:
-                                if self.can_afford(RESEARCH_BLINK) and self.already_pending_upgrade(BLINKTECH) == 0:
-                                    self.do(twilight.research(BLINKTECH))
-                                elif not self.can_afford(RESEARCH_BLINK):
-                                    save_resources = 1
-                            if self.units(ADEPT).amount > 5:
-                                if self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES) and self.already_pending_upgrade(ADEPTPIERCINGATTACK) == 0:
-                                    self.do(twilight.research(ADEPTPIERCINGATTACK))
-                                elif not self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES):
-                                    save_resources = 1
-                                    
-                            # If we want archons, build templar archives
-                            if self.best_unit == ARCHON.id and self.structures(TWILIGHTCOUNCIL).ready:
-                                if not self.structures(TEMPLARARCHIVE):
-                                    if self.can_afford(TEMPLARARCHIVE) and self.already_pending(TEMPLARARCHIVE) == 0:
-                                        await self.build(TEMPLARARCHIVE, near=tech_placement)
+            # Tech up. Don't tech up if threat level is too high! Exception: Making detection
+            if self.threat_level < 1.2:
+                # Tech: Upgrade warpgate units                        
+                if self.best_unit in warpgate_tech:
+                    if self.structures(CYBERNETICSCORE).ready:
+                        if not self.structures(TWILIGHTCOUNCIL):
+                            if self.can_afford(TWILIGHTCOUNCIL) and self.already_pending(TWILIGHTCOUNCIL) == 0:
+                                await self.build(TWILIGHTCOUNCIL, near=tech_placement)
+                                
+                        else:
+                            if self.structures(TWILIGHTCOUNCIL).ready:
+                                twilight = self.structures(TWILIGHTCOUNCIL).ready.first
+                                # If we have lots of zealot/stalker/adept, research charge/blink/glaives
+                                if self.units(ZEALOT).amount > 5:
+                                    if self.can_afford(RESEARCH_CHARGE) and self.already_pending_upgrade(CHARGE) == 0:
+                                        self.do(twilight.research(CHARGE))
+                                    elif not self.can_afford(RESEARCH_CHARGE):
+                                        save_resources = 1
+                                if self.units(STALKER).amount > 5:
+                                    if self.can_afford(RESEARCH_BLINK) and self.already_pending_upgrade(BLINKTECH) == 0:
+                                        self.do(twilight.research(BLINKTECH))
+                                    elif not self.can_afford(RESEARCH_BLINK):
+                                        save_resources = 1
+                                if self.units(ADEPT).amount > 5:
+                                    if self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES) and self.already_pending_upgrade(ADEPTPIERCINGATTACK) == 0:
+                                        self.do(twilight.research(ADEPTPIERCINGATTACK))
+                                    elif not self.can_afford(RESEARCH_ADEPTRESONATINGGLAIVES):
+                                        save_resources = 1
                                         
-                            # If we want DTs, build dark shrine
-                            # TODO: Or if we are maxed out or if they have no detection
-                            if self.best_unit == DARKTEMPLAR.id and self.structures(TWILIGHTCOUNCIL).ready:
-                                if not self.structures(DARKSHRINE):
-                                    if self.can_afford(DARKSHRINE) and self.already_pending(DARKSHRINE) == 0:
-                                        await self.build(DARKSHRINE, near=tech_placement_small)
-            
-            # Tech: T3 stargate                                        
-            if self.best_unit in stargate_tech:
-                if self.structures(STARGATE).ready:
-                    if not self.structures(FLEETBEACON):
-                        if self.can_afford(FLEETBEACON) and self.already_pending(FLEETBEACON) == 0:
-                            await self.build(FLEETBEACON, near=tech_placement)
-                        elif not self.can_afford(FLEETBEACON):
-                            save_resources = 1
-                # If we have no stargate, make one
-                elif not self.structures(STARGATE):
-                    if self.can_afford(STARGATE) and self.already_pending(STARGATE) == 0:
-                        await self.build(STARGATE, near=building_placement)
-                        
-            # Tech: T3 robo    
-            if self.best_unit in robo_tech:                
-                if self.structures(ROBOTICSFACILITY).ready:
-                    if not self.structures(ROBOTICSBAY):
-                        if self.can_afford(ROBOTICSBAY) and self.already_pending(ROBOTICSBAY) == 0:
-                            await self.build(ROBOTICSBAY, near=tech_placement)
-                        elif not self.can_afford(ROBOTICSBAY):
-                            save_resources = 1
-                    # Research thermal lance        
-                    elif self.structures(ROBOTICSBAY).ready:
-                        robobay = self.structures(ROBOTICSBAY).ready.first
-                        if self.can_afford(RESEARCH_EXTENDEDTHERMALLANCE) and self.already_pending_upgrade(EXTENDEDTHERMALLANCE) == 0:
-                            self.do(robobay.research(EXTENDEDTHERMALLANCE))
-                # If we have no robo facility, make one
-                elif not self.structures(ROBOTICSFACILITY):
-                    if self.can_afford(ROBOTICSFACILITY) and self.already_pending(ROBOTICSFACILITY) == 0:
-                        await self.build(ROBOTICSFACILITY, near=building_placement)
+                                # If we want archons, build templar archives
+                                if self.best_unit == ARCHON.id and self.structures(TWILIGHTCOUNCIL).ready:
+                                    if not self.structures(TEMPLARARCHIVE):
+                                        if self.can_afford(TEMPLARARCHIVE) and self.already_pending(TEMPLARARCHIVE) == 0:
+                                            await self.build(TEMPLARARCHIVE, near=tech_placement)
+                                            
+                                # If we want DTs, build dark shrine
+                                # TODO: Or if we are maxed out or if they have no detection
+                                if self.best_unit == DARKTEMPLAR.id and self.structures(TWILIGHTCOUNCIL).ready:
+                                    if not self.structures(DARKSHRINE):
+                                        if self.can_afford(DARKSHRINE) and self.already_pending(DARKSHRINE) == 0:
+                                            await self.build(DARKSHRINE, near=tech_placement_small)
+                
+                    # Tech: T3 stargate                                        
+                    if self.best_unit in stargate_tech:
+                        if self.structures(STARGATE).ready:
+                            if not self.structures(FLEETBEACON):
+                                if self.can_afford(FLEETBEACON) and self.already_pending(FLEETBEACON) == 0:
+                                    await self.build(FLEETBEACON, near=tech_placement)
+                                elif not self.can_afford(FLEETBEACON):
+                                    save_resources = 1
+                        # If we have no stargate, make one
+                        elif not self.structures(STARGATE):
+                            if self.can_afford(STARGATE) and self.already_pending(STARGATE) == 0:
+                                await self.build(STARGATE, near=building_placement)
+                                
+                    # Tech: T3 robo    
+                    if self.best_unit in robo_tech:                
+                        if self.structures(ROBOTICSFACILITY).ready:
+                            if not self.structures(ROBOTICSBAY):
+                                if self.can_afford(ROBOTICSBAY) and self.already_pending(ROBOTICSBAY) == 0:
+                                    await self.build(ROBOTICSBAY, near=tech_placement)
+                                elif not self.can_afford(ROBOTICSBAY):
+                                    save_resources = 1
+                            # Research thermal lance        
+                            elif self.structures(ROBOTICSBAY).ready:
+                                robobay = self.structures(ROBOTICSBAY).ready.first
+                                if self.can_afford(RESEARCH_EXTENDEDTHERMALLANCE) and self.already_pending_upgrade(EXTENDEDTHERMALLANCE) == 0:
+                                    self.do(robobay.research(EXTENDEDTHERMALLANCE))
+                        # If we have no robo facility, make one
+                        elif not self.structures(ROBOTICSFACILITY):
+                            if self.can_afford(ROBOTICSFACILITY) and self.already_pending(ROBOTICSFACILITY) == 0:
+                                await self.build(ROBOTICSFACILITY, near=building_placement)
                 
             # Make detection if needed
             if self.need_detection and not self.have_detection and not self.already_pending(OBSERVER):
@@ -1198,32 +1322,25 @@ class TheUnseenz(sc2.BotAI):
                 # Run through all our production buildings and make sure they are being used
                 # Stargate units
                 if self.structures(FLEETBEACON).ready: #Taking out oracles until I figure out logic for their energy management
-                    available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id, CARRIER.id]
+                    available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id] # Carriers bugged, taking them out!
                 else:
                     available_stargate_units = [PHOENIX.id, VOIDRAY.id]
-                self.best_unit = self.own_army_race[available_stargate_units[np.argmin(self.unit_score[available_stargate_units])]]
-                # Update resource spending rate to be based on what units we are making
-                self.STARGATE_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
-                self.STARGATE_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
-                self.STARGATE_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time
+                self.best_stargate_unit = self.own_army_race[available_stargate_units[np.argmin(self.unit_score[available_stargate_units])]]
                 for sg in self.structures(STARGATE).idle:
-                    if self.can_afford(self.best_unit):
-                        self.do(sg.train(self.best_unit), subtract_cost=True, subtract_supply=True)
+                    if self.can_afford(self.best_stargate_unit):
+                        self.do(sg.train(self.best_stargate_unit), subtract_cost=True, subtract_supply=True)
                 
                 # Robo units. TODO: Flag to produce observers and warp prism
                 if self.structures(ROBOTICSBAY).ready:
-                    available_robo_units = [IMMORTAL.id, COLOSSUS.id, DISRUPTOR.id]
-                    self.best_unit = self.own_army_race[available_robo_units[np.argmin(self.unit_score[available_robo_units])]]
+                    available_robo_units = [IMMORTAL.id, COLOSSUS.id] # No logic for disruptors yet!
+                    self.best_robo_unit = self.own_army_race[available_robo_units[np.argmin(self.unit_score[available_robo_units])]]
                 else:
                     available_robo_units = [IMMORTAL.id]
-                    self.best_unit = IMMORTAL
-                # Update resource spending rate to be based on what units we are making
-                self.ROBO_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
-                self.ROBO_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
-                self.ROBO_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time                
+                    self.best_robo_unit = IMMORTAL
+                
                 for rb in self.structures(ROBOTICSFACILITY).idle:
-                    if self.can_afford(self.best_unit):
-                        self.do(rb.train(self.best_unit), subtract_cost=True, subtract_supply=True)
+                    if self.can_afford(self.best_robo_unit):
+                        self.do(rb.train(self.best_robo_unit), subtract_cost=True, subtract_supply=True)
                 
                 # Warpgate units. Prioritize robo and stargate units.
                 available_warpgate_units = [ZEALOT.id]
@@ -1235,15 +1352,9 @@ class TheUnseenz(sc2.BotAI):
                     available_warpgate_units.append(ARCHON.id)
                 if self.structures(DARKSHRINE).ready:
                     available_warpgate_units.append(DARKTEMPLAR.id)
-                self.best_unit = self.own_army_race[available_warpgate_units[np.argmin(self.unit_score[available_warpgate_units])]]
-                # Update resource spending rate to be based on what units we are making
-                self.WARPGATE_MINERAL_RATE = self.best_unit.minerals/self.best_unit.build_time
-                self.WARPGATE_VESPENE_RATE = self.best_unit.vespene/self.best_unit.build_time
-                self.WARPGATE_SUPPLY_RATE = self.best_unit.supply/self.best_unit.build_time
+                self.best_warpgate_unit = self.own_army_race[available_warpgate_units[np.argmin(self.unit_score[available_warpgate_units])]]
                 
-                if not self.structures(STARGATE).ready.idle and not self.structures(ROBOTICSFACILITY).ready.idle:                
-                    if self.structures(PYLON).ready:
-                        proxy = self.structures(PYLON).closest_to(self.enemy_start_locations[0])
+                if not self.structures(STARGATE).ready.idle and not self.structures(ROBOTICSFACILITY).ready.idle:
                     # TODO: Warp-in at power field closest to enemy, but at a minimum distance away. Include warp prism power fields.
                     warp_ready = 0
                     for wg in self.structures(WARPGATE).ready:
@@ -1254,14 +1365,14 @@ class TheUnseenz(sc2.BotAI):
                                 random_pylon = self.structures(PYLON).random
                                 pos = random_pylon.position.to2.random_on_distance(4)
                                 placement = await self.find_placement(WARPGATETRAIN_STALKER, pos, placement_step=1)
-                                warp_try +=1
+                                warp_try += 1
                                 if warp_try >= 5:
                                     break
                             # If we have an odd number of high templars, add another to make a complete archon (since we don't have spellcasting logic yet)
-                            if (self.best_unit == ARCHON or self.units(HIGHTEMPLAR).amount%2 == 1) and self.can_afford(HIGHTEMPLAR):
+                            if (self.best_warpgate_unit == ARCHON or self.units(HIGHTEMPLAR).amount%2 == 1) and self.can_afford(HIGHTEMPLAR):
                                 self.do(wg.warp_in(HIGHTEMPLAR, warpin_placement), subtract_cost=True, subtract_supply=True)
-                            elif self.can_afford(self.best_unit):
-                                self.do(wg.warp_in(self.best_unit, warpin_placement), subtract_cost=True, subtract_supply=True)
+                            elif self.can_afford(self.best_warpgate_unit):
+                                self.do(wg.warp_in(self.best_warpgate_unit, warpin_placement), subtract_cost=True, subtract_supply=True)
                             else:
                                 warp_ready += 1
                                 
@@ -1280,10 +1391,27 @@ class TheUnseenz(sc2.BotAI):
                             available_warpgate_units.append(SENTRY.id)
                             available_warpgate_units.append(ADEPT.id)
                         if self.structures(FLEETBEACON):
-                            available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id, CARRIER.id]
+                            available_stargate_units = [PHOENIX.id, VOIDRAY.id, TEMPEST.id]
                         if self.structures(ROBOTICSBAY):
-                            available_robo_units = [IMMORTAL.id, COLOSSUS.id, DISRUPTOR.id]
-                            
+                            available_robo_units = [IMMORTAL.id, COLOSSUS.id]
+                        
+                        # Update resource spending rate to be based on what units we are making
+                        # Stargate:
+                        self.best_stargate_unit = self.own_army_race[available_stargate_units[np.argmin(self.unit_score[available_stargate_units])]]
+                        self.STARGATE_MINERAL_RATE = self.best_stargate_unit.minerals/self.best_stargate_unit.build_time
+                        self.STARGATE_VESPENE_RATE = self.best_stargate_unit.vespene/self.best_stargate_unit.build_time
+                        self.STARGATE_SUPPLY_RATE = self.best_stargate_unit.supply/self.best_stargate_unit.build_time
+                        # Robo:
+                        self.best_robo_unit = self.own_army_race[available_robo_units[np.argmin(self.unit_score[available_robo_units])]]
+                        self.ROBO_MINERAL_RATE = self.best_robo_unit.minerals/self.best_robo_unit.build_time
+                        self.ROBO_VESPENE_RATE = self.best_robo_unit.vespene/self.best_robo_unit.build_time
+                        self.ROBO_SUPPLY_RATE = self.best_robo_unit.supply/self.best_robo_unit.build_time           
+                        # Warpgate: 
+                        self.best_warpgate_unit  = self.own_army_race[available_warpgate_units[np.argmin(self.unit_score[available_warpgate_units])]]
+                        self.WARPGATE_MINERAL_RATE = self.best_warpgate_unit.minerals/self.best_warpgate_unit.build_time
+                        self.WARPGATE_VESPENE_RATE = self.best_warpgate_unit.vespene/self.best_warpgate_unit.build_time
+                        self.WARPGATE_SUPPLY_RATE = self.best_warpgate_unit.supply/self.best_warpgate_unit.build_time
+                                
                         available_units = available_warpgate_units                            
                         if self.structures(CYBERNETICSCORE).ready:
                             for unit in available_robo_units:
@@ -1306,36 +1434,52 @@ class TheUnseenz(sc2.BotAI):
                                     await self.build(STARGATE, near=building_placement)
                         # We've already added extra production and are using them, but they still have an advantage.                                
                         elif self.threat_level > 1.2: # 1 extra shield battery for every 0.2 threat level advantage they have (1.4,1.6...)
-                            if (self.structures(SHIELDBATTERY).amount + self.already_pending(SHIELDBATTERY)) < min(((self.threat_level - 1.2)*5), 5):
+                            if (self.structures(SHIELDBATTERY).amount + self.already_pending(SHIELDBATTERY)) < min(((self.threat_level - 1)*5), 5):
                                 if self.can_afford(SHIELDBATTERY):
                                     await self.build(SHIELDBATTERY, near=defence_placement_small)
         
-	# Update frequency for threat level and ideal unit calculations
+        # Update frequency for threat level and ideal unit calculations
         if iteration%20 == 0:
             self.last_army_supply = self.supply_army
             self.last_known_enemy_amount = len(self.known_enemy_units)
         # Debug info, print every minute
-        if iteration%165 == 0:
+        if iteration%self.ITERATIONS_PER_MINUTE == 0:
             print("Income")
             print(mineral_income)
             print(vespene_income)
             print(mineral_rate)
             print(vespene_rate)
+            print("Resource ratio:")
+            print(self.resource_ratio)
             print(num_warpgates)
             print(num_stargates)
             print(num_robos)
             print("Unit info")
             print(self.threat_level)
+            await self.chat_send("Threat level:")
+            await self.chat_send(str(self.threat_level))
+            print("Enemy resources:")
+            print(self.enemy_minerals)
+            print(self.enemy_vespene)
+#            await self.chat_send("Estimated enemy resources:")
+#            await self.chat_send(str(self.enemy_minerals))
+#            await self.chat_send(str(self.enemy_vespene))
+            
+     
             
 def main():
     sc2.run_game(
         sc2.maps.get("ZenLE"),
         #[Human(Race.Terran, name="PunyHuman"),Bot(Race.Protoss, TheUnseenz(), name="TheUnseenz")],
-        [Bot(Race.Protoss, TheUnseenz(), name="TheUnseenz"), Computer(Race.Zerg, Difficulty.CheatInsane)],
+        [Bot(Race.Protoss, TheUnseenz(), name="TheUnseenz"), Computer(Race.Protoss, Difficulty.VeryHard, sc2.AIBuild.Rush)],
         realtime=False,
     )
-
-
+#Bot builds:
+#sc2.AIBuild.Rush,
+#sc2.AIBuild.Timing,
+#sc2.AIBuild.Power,
+#sc2.AIBuild.Macro,
+#sc2.AIBuild.Air,
 
 if __name__ == "__main__":
     main()
