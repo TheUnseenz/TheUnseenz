@@ -630,13 +630,15 @@ class TheUnseenz(sc2.BotAI):
         
         # Lists out the expansions on the map. Ordered expansions shows expansions that have not yet been taken (or are taken by enemy but we don't know yet)
         # Enemy expansions are all expansions we know the enemy has.
-        self.ordered_expansions = list(self.expansion_locations_list - self.owned_expansions.keys() - set(self.enemy_expansions))
+        # Hotfix until I work out proper micro: enemy owned bases are included in scouting locations. This is not ideal because we will keep running our army into the enemy.
+#        self.ordered_expansions = list(self.expansion_locations_list - self.owned_expansions.keys() - set(self.enemy_expansions)) 
+        self.ordered_expansions = list(self.expansion_locations_list - self.owned_expansions.keys())
         self.ordered_expansions = sorted(
             self.ordered_expansions, key=lambda expansion: expansion.distance_to(self.start_location) 
         )
 
         for base in self.ordered_expansions:
-            townhalls = {NEXUS, COMMANDCENTER, ORBITALCOMMAND, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
+            townhalls = {NEXUS, COMMANDCENTER, COMMANDCENTERFLYING, ORBITALCOMMAND, ORBITALCOMMANDFLYING, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
             if self.enemy_structures(townhalls).closer_than(5, base):
                 if base not in self.enemy_expansions:
                     self.enemy_expansions.append(base)
@@ -711,7 +713,7 @@ class TheUnseenz(sc2.BotAI):
         # Will not include the cost of the drone for zerg buildings (we might not see the worker that was used)
         # Will only recognize lost mining time after seeing the mineral fields (especially relevant vs terran)
         # Will not model mule mining rate, but upon seeing more minerals being mined from the mineral patch, will retroactively add that in.
-        townhalls = {NEXUS, COMMANDCENTER, ORBITALCOMMAND, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
+        townhalls = {NEXUS, COMMANDCENTER, COMMANDCENTERFLYING, ORBITALCOMMAND, ORBITALCOMMANDFLYING, PLANETARYFORTRESS, HATCHERY, LAIR, HIVE}
         num_townhalls = max(len(self.enemy_structures(townhalls)),1)
         self.enemy_minerals_mined = 50 # Initial base which will be deducted later.
         self.enemy_vespene_mined = 0
@@ -933,14 +935,22 @@ class TheUnseenz(sc2.BotAI):
             # Deduct each extra tech building we see from the total money they should have
             # Possible future units are less important to deal with than current units, especially when considering we may not guess right.
             
-            future_unit_value = max(0.5*(self.enemy_minerals + self.gas_value*self.enemy_vespene),100) # Why are we sometimes getting negative resources?
+            # Why are we sometimes getting negative resources?
+            # If we see that minerals or vespene are negative but minerals + vespene is positive, assume that means they mined more minerals/gas instead
+            if self.enemy_minerals < 0 and self.enemy_vespene > 0:
+                self.enemy_vespene = 50 + self.enemy_minerals
+                self.enemy_minerals = 50
+            if self.enemy_minerals > 0 and self.enemy_vespene < 0:
+                self.enemy_vespene = 50
+                self.enemy_minerals = 50 + self.enemy_minerals
+            future_unit_value = max(0.35*(self.enemy_minerals + self.gas_value*self.enemy_vespene),100) 
             
             # TODO: Enemies are capped both by resources and by production. We will most likely not see all their production, and these extra production buildings will cost money too!
             # Also: mineral-gas ratios should be considered, but how?
             
             # What type: Based on the tech and production we see, calculate possible tech switches and amount of units in the future. More likely to see units we already see and new tech that was added.
             total_unit_value = self.enemy_army_value[0] + self.gas_value*self.enemy_army_value[1]
-            current_future_unit_ratio = 0.8 # Ratio of assuming enemy will make more of what they currently have vs tech switching. Higher ratio = harder counters, lower ratio = more generalist approach
+            current_future_unit_ratio = 0.75 # Ratio of assuming enemy will make more of what they currently have vs tech switching. Higher ratio = harder counters, lower ratio = more generalist approach
             future_enemy_units = np.zeros(len(self.enemy_army_race))
             for enemy_army in self.enemy_army_race:
                 # Current_future_unit_ratio = % of army of that unit type
@@ -983,9 +993,8 @@ class TheUnseenz(sc2.BotAI):
                 # If the enemy is not a threat, group up all army to attack together.
                 if True: #min(threat_level) < 1:
                     target = targets.closest_to(army)
-                    # Seems like there was an update which I didn't get yet, so I can't use this yet?
-                    # Unit has no attack, stay near other army units                    
-                    if not army.can_attack and not army.is_moving: 
+                    # Unit has no attack, stay near other army units
+                    if not army.can_attack and not army.is_moving:
                         army.move(self.all_army.closest_to(army))
                     # Attack: If unit has attack ready and enemy is in range/are near enough for us to hit without overextending 
                     elif army.weapon_ready and \
@@ -1210,13 +1219,13 @@ class TheUnseenz(sc2.BotAI):
         if self.supply_workers + self.NEXUS_SUPPLY_RATE*self.NEXUS_BUILD_TIME >= \
         (self.townhalls.ready.amount + self.already_pending(NEXUS))*16 + min(ideal_gas_buildings, self.townhalls.amount*2)*3 and self.threat_level < 2:
             if self.can_afford(NEXUS):
-                await self.expand_now()
+                await self.expand_now(max_distance = 0)
             # If we need an expansion but don't have resources, save for it unless we are in danger
             elif self.threat_level < 2:
                 save_resources = 1
         # If we have reached max workers and have a lot more minerals than gas, expand for more gas.
         elif self.supply_workers > self.MAX_WORKERS-10 and self.minerals > 1000 and ideal_gas_buildings > self.townhalls.amount*2 and self.already_pending(NEXUS) == 0:
-            await self.expand_now()
+            await self.expand_now(max_distance = 0)
             
         # Build gas near completed nexuses, dynamically adjusted for how much gas we need for the units we want to make.        
         if (self.structures(ASSIMILATOR).ready.amount + self.already_pending(ASSIMILATOR)) < ideal_gas_buildings and num_production:
@@ -1227,6 +1236,8 @@ class TheUnseenz(sc2.BotAI):
                         break                    
                     if not self.gas_buildings.closer_than(1,vg):
                         worker = self.select_build_worker(vg.position)
+                        if worker is None:
+                            break
                         worker.build(ASSIMILATOR, vg)
                         worker.stop(queue=True)
                         break
@@ -1289,7 +1300,7 @@ class TheUnseenz(sc2.BotAI):
             # Tech up. Don't tech up if threat level is too high! Exception: Making detection
             if self.threat_level < 2:
                 # Tech: Upgrade warpgate units                        
-                if self.best_unit in warpgate_tech or self.units(ZEALOT).amount > 5 or self.units(STALKER).amount > 10 or self.units(ADEPT) > 10:
+                if self.best_unit in warpgate_tech or len(self.units(ZEALOT)) > 5 or len(self.units(STALKER)) > 10 or len(self.units(ADEPT)) > 10:
                     if self.structures(CYBERNETICSCORE).ready:
                         if not self.structures(TWILIGHTCOUNCIL):
                             if self.can_afford(TWILIGHTCOUNCIL) and self.already_pending(TWILIGHTCOUNCIL) == 0:
@@ -1494,30 +1505,17 @@ class TheUnseenz(sc2.BotAI):
             self.last_known_enemy_amount = len(self.known_enemy_units)
         # Debug info, print every minute
         if iteration%self.ITERATIONS_PER_MINUTE == 0:
-            print("Income")
-            print(mineral_income)
-            print(vespene_income)
-            print(mineral_rate)
-            print(vespene_rate)
-            print("Resource ratio:")
-            print(self.resource_ratio)
+            print("Mineral income: " + str('%.1f'%(mineral_income)) + "Gas income: " + str('%.1f'%(vespene_income)))
+            print("Mineral expense: " + str('%.1f'%(mineral_rate)) + "Gas expense: " + str('%.1f'%(vespene_rate)))
+            print("Resource ratio:" + str('%.3f'%(self.resource_ratio)))
             print(num_warpgates)
             print(num_stargates)
             print(num_robos)
-            print("Unit info")
+            print("Threat level")
             print(self.threat_level)
-            await self.chat_send("Threat level:")
-            await self.chat_send(str(self.threat_level))
-            print("Enemy resources:")
-            print(self.enemy_minerals)
-            print(self.enemy_vespene)
-#            print("Expansions")
-#            print(self.owned_expansions)
-#            print(self.expansion_locations_list)
-            
-#            await self.chat_send("Estimated enemy resources:")
-#            await self.chat_send(str(self.enemy_minerals))
-#            await self.chat_send(str(self.enemy_vespene))
+            await self.chat_send("Threat level: " + str('%.3f'%(self.threat_level)))
+            await self.chat_send("Estimated enemy resources: Minerals: " + str('%.0f'%(self.enemy_minerals)) + " Gas: " + str('%.0f'%(self.enemy_vespene)))
+
             
      
             
